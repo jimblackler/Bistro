@@ -152,7 +152,8 @@ bool Renderer::init(AAssetManager* assets) {
     }
     scene_.begin(&ctx_, assets);
     initialized_ = true;
-    LOGI("Renderer initialised; camera loop is %.0f m (%.0f s)", path_.totalLength(), path_.loopDuration());
+    LOGI("Renderer initialised; camera loops: exterior %.1f s + interior %.1f s (%.0f m total)",
+         path_.exteriorDuration(), path_.interiorDuration(), path_.totalLength());
     return true;
 }
 
@@ -1120,8 +1121,15 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
     if (cameraOverride_.enabled) {
         pose.eye = cameraOverride_.eye;
         pose.target = cameraOverride_.target;
+    } else if (pose.segment != lastCameraSegment_) {
+        if (lastCameraSegment_ >= 0) {
+            LOGI("Switching camera to %s fly-through", pose.segment == 0 ? "Exterior" : "Restaurant Interior");
+        }
+        lastCameraSegment_ = pose.segment;
+        invalidateHistory();
     }
     stats_.cameraPos = pose.eye;
+    stats_.cameraSegment = pose.segment;
     float aspect = static_cast<float>(logicalExtent_.width) / static_cast<float>(logicalExtent_.height);
     Mat4 view = Mat4::lookAt(pose.eye, pose.target, Vec3{0, 1, 0});
     Mat4 proj = Mat4::perspectiveReversedInfinite(kFovY, aspect, kNearPlane);

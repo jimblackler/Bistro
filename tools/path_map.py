@@ -18,9 +18,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FOV_Y = math.radians(52.0)
 
 
-def control_points():
+def control_points(array_name='kExteriorKeyframes'):
     src = open(os.path.join(ROOT, 'app', 'src', 'main', 'cpp', 'camera_path.cpp')).read()
-    block = src[src.index('kKeyframes[] = {'):]
+    block = src[src.index(array_name + '[] = {'):]
     block = block[:block.index('};')]
     return [tuple(float(v.rstrip('f')) for v in m)
             for m in re.findall(r'\{\{(-?[\d.]+f), (-?[\d.]+f), (-?[\d.]+f)\},', block)]

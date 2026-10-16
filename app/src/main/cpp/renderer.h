@@ -32,6 +32,7 @@ struct RenderStats {
     uint32_t renderHeight = 0;
     float exposure = 1.0f;
     Vec3 cameraPos;
+    int cameraSegment = 0;  // 0 = Exterior, 1 = Restaurant Interior
 };
 
 // Owns all Vulkan state and renders the Bistro fly-through. Must only be used from the render thread.
@@ -105,6 +106,7 @@ private:
     CameraPath path_;
     CameraOverride cameraOverride_;
     RenderStats stats_;
+    int lastCameraSegment_ = -1;
     bool initFailed_ = false;
     bool initialized_ = false;
 

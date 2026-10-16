@@ -27,6 +27,9 @@ See [ATTRIBUTION.md](ATTRIBUTION.md) for the asset credits and licence (CC BY 4.
 - **4× MSAA** resolved on-tile (transient attachments), **alpha-to-coverage** foliage.
 - **HDR post**: auto-exposure (compute), bloom (dual filter), ACES tone mapping, grading, vignette.
 - **Swapchain pre-rotation** to avoid compositor rotation on Android.
+- **Two-stage camera fly-through**: alternates between a street-level exterior tour around the
+  boulevard (~181 s) and a close-up interior tour inside the restaurant dining room, wine alcove,
+  and zinc bar counter (~49 s), resetting temporal history cleanly on each cut.
 - Dedicated native render thread; asset streaming with a loading screen.
 
 ## Building

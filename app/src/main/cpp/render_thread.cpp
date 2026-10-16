@@ -128,9 +128,10 @@ void RenderThread::run() {
                      static_cast<int>(renderer.loadProgress() * 100.0f));
         } else {
             const RenderStats& s = renderer.stats();
+            const char* tour = s.cameraSegment == 0 ? "Exterior" : "Interior";
             snprintf(buf, sizeof(buf),
-                     "%.0f fps · GPU %.1f ms · %u×%u %s\n%u/%u clusters · %.2fM of %.1fM triangles drawn",
-                     s.fps, s.gpuMs, s.renderWidth, s.renderHeight, s.taa ? "TAA" : "4×MSAA",
+                     "%s · %.0f fps · GPU %.1f ms · %u×%u %s\n%u/%u clusters · %.2fM of %.1fM triangles drawn",
+                     tour, s.fps, s.gpuMs, s.renderWidth, s.renderHeight, s.taa ? "TAA" : "4×MSAA",
                      s.visibleClusters[0] + s.visibleClusters[1] + s.visibleClusters[2], s.totalClusters,
                      static_cast<double>(s.visibleTriangles) / 1e6, static_cast<double>(s.totalTriangles) / 1e6);
             static int logCounter = 0;
