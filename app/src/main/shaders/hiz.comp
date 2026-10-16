@@ -1,0 +1,30 @@
+#version 460
+
+// Builds one level of the hierarchical-Z pyramid used for GPU occlusion culling.
+// Reversed-Z: smaller values are farther away, so each texel stores the MIN (farthest) depth of its
+// footprint in the source level - a conservative bound for "everything here is at least this close".
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 0) uniform sampler2D srcDepth;
+layout(set = 1, binding = 1, r32f) uniform writeonly image2D dstLevel;
+
+layout(push_constant) uniform Push {
+    ivec2 srcSize;
+    ivec2 dstSize;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, pc.dstSize))) return;
+    vec2 scale = vec2(pc.srcSize) / vec2(pc.dstSize);
+    ivec2 s0 = ivec2(floor(vec2(p) * scale));
+    ivec2 s1 = min(ivec2(ceil(vec2(p + 1) * scale)) - 1, pc.srcSize - 1);
+    s0 = min(s0, s1);
+    float d = 1.0;
+    for (int y = s0.y; y <= s1.y; ++y) {
+        for (int x = s0.x; x <= s1.x; ++x) {
+            d = min(d, texelFetch(srcDepth, ivec2(x, y), 0).r);
+        }
+    }
+    imageStore(dstLevel, p, vec4(d));
+}
