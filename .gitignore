@@ -1,0 +1,16 @@
+/.gradle/
+/.idea/
+/.vscode
+/.kotlin/
+/local.properties
+*.spv
+build/
+.cxx/
+.DS_Store
+
+# Asset pipeline intermediates and local Python/tool environment
+/source_assets/*.zip
+/build_assets/
+/.venv/
+/tools/bin/
+__pycache__/
