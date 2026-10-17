@@ -142,6 +142,7 @@ bool Renderer::init(AAssetManager* assets) {
     renderScale_ = std::clamp(debugProperty("debug.bistro.scale", renderScale_), 0.25f, 1.0f);
     occlusionCulling_ = debugProperty("debug.bistro.occlusion", 1.0f) > 0.5f;
     buildHiz_ = debugProperty("debug.bistro.hiz", 1.0f) > 0.5f;
+    skyDebug_ = debugProperty("debug.bistro.skydebug", 0.0f) > 0.5f;
     if (!ctx_.init()) {
         initFailed_ = true;
         return false;
@@ -550,7 +551,7 @@ bool Renderer::createPipelines() {
     const VkCompareOp reversedZ = VK_COMPARE_OP_GREATER_OR_EQUAL;
     opaquePipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), kSceneFrag, sizeof(kSceneFrag),
                                              pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
-                                             VK_CULL_MODE_BACK_BIT, true, true, reversedZ, kBlendNone, false, 0,
+                                             VK_CULL_MODE_NONE, true, true, reversedZ, kBlendNone, false, 0,
                                              false, "Scene Opaque");
     maskPipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), kSceneFrag, sizeof(kSceneFrag),
                                            pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
@@ -1008,7 +1009,7 @@ bool Renderer::buildShadowMap() {
     for (const auto& pl : scene_.pointLights) {
         if (pointLights_.size() / 2 >= kMaxPointLights) break;
         pointLights_.push_back(Vec4{pl.position[0], pl.position[1], pl.position[2], pl.range});
-        constexpr float kLightScale = 0.012f;
+        constexpr float kLightScale = 0.030f;
         pointLights_.push_back(Vec4{pl.color[0] * kLightScale, pl.color[1] * kLightScale, pl.color[2] * kLightScale, 0});
     }
     LOGI("Sun direction (%.3f %.3f %.3f), env yaw %.2f rad", sunDirection_.x, sunDirection_.y, sunDirection_.z,
@@ -1184,7 +1185,7 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
     u.sunColor[3] = std::cos(0.0047f);  // angular radius of the sun
     u.envRotation[0] = std::cos(envYaw_);
     u.envRotation[1] = std::sin(envYaw_);
-    u.envRotation[2] = 1.0f;  // sky intensity
+    u.envRotation[2] = skyDebug_ ? -1.0f : 1.0f;  // sky intensity (negative = debug highlight)
     u.envRotation[3] = 1.0f;  // IBL intensity
     for (int i = 0; i < 9; ++i)
         for (int c = 0; c < 3; ++c) u.sh[i][c] = scene_.environment.sh[i][c];

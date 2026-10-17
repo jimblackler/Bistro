@@ -155,6 +155,7 @@ private:
     bool hizValid_ = false;
     bool occlusionCulling_ = true;
     bool buildHiz_ = true;
+    bool skyDebug_ = false;  // `setprop debug.bistro.skydebug 1`: paint the sky magenta to find leaks
     std::array<VkImageView, kBloomLevels> bloomViews_{};
     std::array<VkExtent2D, kBloomLevels> bloomExtents_{};
 

@@ -140,12 +140,26 @@ public:
         std::vector<uint32_t> materialRemap(scene->mNumMaterials);
         for (unsigned i = 0; i < scene->mNumMaterials; ++i) materialRemap[i] = registerMaterial(scene->mMaterials[i]);
 
+        aiMatrix4x4 rootTransform;
+        float sceneScale = 1.0f;
+        if (isPrimary) {
+            if (scene->mRootNode->mNumChildren == 1 && scene->mRootNode->mChildren[0]->mNumMeshes == 0) {
+                float s = scene->mRootNode->mChildren[0]->mTransformation.a1 / 0.01f;
+                if (s > 0.1f) primaryScale_ = s;
+            }
+        } else if (scene->mRootNode->mNumChildren > 1) {
+            // BistroInterior.fbx has no top-level wrapper node, so its child nodes use 0.01 (1.0x)
+            // whereas BistroExterior.fbx wraps its children in a 0.016 (1.6x) root node.
+            sceneScale = primaryScale_;
+            rootTransform.a1 = rootTransform.b2 = rootTransform.c3 = sceneScale;
+        }
+
         size_t skipped = 0, added = 0;
-        walk(scene, scene->mRootNode, aiMatrix4x4(), materialRemap, isPrimary, skipped, added);
-        printf("  instances added: %zu, skipped as duplicates: %zu\n", added, skipped);
+        walk(scene, scene->mRootNode, rootTransform, materialRemap, isPrimary, skipped, added);
+        printf("  instances added: %zu, skipped as duplicates: %zu (scale %.2f)\n", added, skipped, sceneScale);
 
         if (isPrimary) extractLightsAndCamera(scene);
-        extractPointLights(scene);
+        extractPointLights(scene, rootTransform, sceneScale);
         importers_.push_back(std::move(importer));
         return true;
     }
@@ -426,13 +440,12 @@ private:
             }
             bool duplicate = false;
             if (isPrimary) {
-                primaryNodes_.insert({nodeName, {mn, mx}});
+                primaryBounds_.push_back({mn, mx});
             } else {
-                auto range = primaryNodes_.equal_range(nodeName);
-                for (auto it = range.first; it != range.second; ++it) {
-                    Vec3 dmn = it->second.first - mn, dmx = it->second.second - mx;
+                for (const auto& [pmn, pmx] : primaryBounds_) {
+                    Vec3 dmn = pmn - mn, dmx = pmx - mx;
                     if (std::fabs(dmn.x) + std::fabs(dmn.y) + std::fabs(dmn.z) + std::fabs(dmx.x) +
-                            std::fabs(dmx.y) + std::fabs(dmx.z) < 0.05f) {
+                            std::fabs(dmx.y) + std::fabs(dmx.z) < 0.10f) {
                         duplicate = true;
                         break;
                     }
@@ -562,6 +575,7 @@ private:
     }
 
     uint32_t classifyAlpha(const MaterialInfo& m) const {
+        if (containsCI(m.name, "Frosted") || containsCI(m.name, "Frozen")) return bistro::kAlphaOpaque;
         if (containsCI(m.name, "Glass") || containsCI(m.name, "Water") || containsCI(m.name, "Ice") ||
             containsCI(m.name, "Wine") || containsCI(m.name, "Beer")) {
             // Opaque labels/bottles with "Wine" in the name but no translucency should stay opaque.
@@ -633,19 +647,20 @@ private:
         }
     }
 
-    void extractPointLights(const aiScene* scene) {
+    void extractPointLights(const aiScene* scene, const aiMatrix4x4& rootTransform, float sceneScale) {
         for (unsigned i = 0; i < scene->mNumLights; ++i) {
             const aiLight* light = scene->mLights[i];
             if (light->mType != aiLightSource_POINT && light->mType != aiLightSource_SPOT) continue;
             const aiNode* node = scene->mRootNode->FindNode(light->mName);
             aiMatrix4x4 world;
             for (const aiNode* n = node; n; n = n->mParent) world = n->mTransformation * world;
+            world = rootTransform * world;
             aiVector3D p = world * light->mPosition;
             bistro::PointLightRecord r{};
             r.position[0] = p.x;
             r.position[1] = p.y;
             r.position[2] = p.z;
-            r.range = 9.0f;
+            r.range = 9.0f * sceneScale;
             r.color[0] = light->mColorDiffuse.r;
             r.color[1] = light->mColorDiffuse.g;
             r.color[2] = light->mColorDiffuse.b;
@@ -707,7 +722,8 @@ private:
     std::vector<MaterialGeometry> geometry_;
     std::map<std::string, uint32_t> materialByName_;
     std::vector<std::pair<std::string, uint32_t>> textures_;
-    std::multimap<std::string, std::pair<Vec3, Vec3>> primaryNodes_;
+    std::vector<std::pair<Vec3, Vec3>> primaryBounds_;
+    float primaryScale_ = 1.0f;
     std::vector<bistro::CameraKey> cameraKeys_;
     std::vector<bistro::PointLightRecord> pointLights_;
     float sunDir_[3] = {0.3f, 0.8f, 0.2f};

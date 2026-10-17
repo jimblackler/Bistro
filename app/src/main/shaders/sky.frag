@@ -14,7 +14,7 @@ void main() {
     vec4 p1 = frame.invViewProj * vec4(ndc, 0.5, 1.0);
     vec3 dir = normalize(p1.xyz / p1.w - p0.xyz / p0.w);
 
-    vec3 color = textureLod(skyTexture, equirectUV(worldToEnv(dir)), 0.0).rgb * frame.envRotation.z;
+    vec3 color = textureLod(skyTexture, equirectUV(worldToEnv(dir)), 0.0).rgb * abs(frame.envRotation.z);
 
     // Sun disc with a soft limb and a gentle glow.
     float cosAngle = dot(dir, frame.sunDirection.xyz);
@@ -27,5 +27,10 @@ void main() {
     // Haze toward the horizon to match the aerial perspective applied to geometry.
     float horizon = pow(1.0 - clamp(abs(dir.y), 0.0, 1.0), 6.0);
     color = mix(color, frame.fogColor.rgb, horizon * frame.fogParams.w * 0.6);
+    if (frame.envRotation.z < 0.0) {
+        // Debug (`debug.bistro.skydebug`): magenta sky to reveal holes in the geometry.
+        float l = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        color = vec3(l * 1.5, 0.0, l * 1.5);
+    }
     outColor = vec4(color, 1.0);
 }

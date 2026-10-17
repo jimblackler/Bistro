@@ -55,26 +55,26 @@ constexpr int kNumExteriorPoints = sizeof(kExteriorKeyframes) / sizeof(kExterior
 // and back through the centre aisle of set tables.
 const CameraPath::Keyframe kInteriorKeyframes[] = {
     // Near the front corner entrance, looking across the dining room toward the bar counter.
-    {{0.4f, 2.0f, -1.8f}, {6.8f, 1.8f, -2.2f}},
+    {{0.64f, 3.20f, -2.88f}, {10.88f, 2.88f, -3.52f}},
     // Glide north along the west window tables, looking at the set tables and bar.
-    {{1.5f, 2.0f, -2.9f}, {6.5f, 1.8f, -3.5f}},
-    {{2.7f, 2.05f, -4.5f}, {5.8f, 1.9f, -6.8f}},
+    {{2.40f, 3.20f, -4.64f}, {10.40f, 2.88f, -5.60f}},
+    {{4.32f, 3.28f, -7.20f}, {9.28f, 3.04f, -10.88f}},
     // Peer into the north dining room / wine alcove, panning across the wine racks and paintings.
-    {{3.6f, 2.05f, -5.3f}, {6.2f, 2.0f, -8.5f}},
-    {{4.3f, 2.05f, -5.0f}, {6.8f, 1.9f, -6.2f}},
+    {{5.76f, 3.28f, -8.48f}, {9.92f, 3.20f, -13.60f}},
+    {{6.88f, 3.28f, -8.00f}, {10.88f, 3.04f, -9.92f}},
     // Turn south-east toward the curved end of the zinc bar counter and espresso machine.
-    {{4.7f, 2.02f, -4.1f}, {7.4f, 1.85f, -3.0f}},
-    {{4.8f, 2.0f, -3.2f}, {7.9f, 1.85f, -2.4f}},
+    {{7.52f, 3.232f, -6.56f}, {11.84f, 2.96f, -4.80f}},
+    {{7.68f, 3.20f, -5.12f}, {12.64f, 2.96f, -3.84f}},
     // Cruise parallel to the bar stools, looking closely at the beer taps, bottles, and cash register.
-    {{5.6f, 1.95f, -2.3f}, {8.5f, 1.85f, -2.0f}},
-    {{7.0f, 1.95f, -1.3f}, {9.8f, 1.85f, -1.4f}},
+    {{8.96f, 3.12f, -3.68f}, {13.60f, 2.96f, -3.20f}},
+    {{11.20f, 3.12f, -2.08f}, {15.68f, 2.96f, -2.24f}},
     // Reach the east end of the bar and turn back toward the main dining room and sunlit windows.
-    {{8.2f, 2.0f, -0.5f}, {5.0f, 1.7f, 0.8f}},
-    {{6.6f, 2.0f, -0.1f}, {2.8f, 1.6f, 0.5f}},
+    {{13.12f, 3.20f, -0.80f}, {8.00f, 2.72f, 1.28f}},
+    {{10.56f, 3.20f, -0.16f}, {4.48f, 2.56f, 0.80f}},
     // Float west down the main dining aisle between the bistro tables and ceiling fans.
-    {{4.8f, 2.0f, -1.0f}, {0.8f, 1.65f, -0.5f}},
-    {{2.8f, 2.0f, -1.7f}, {0.2f, 1.75f, -2.2f}},
-    {{1.2f, 2.0f, -1.4f}, {5.5f, 1.8f, -2.0f}},
+    {{7.68f, 3.20f, -1.60f}, {1.28f, 2.64f, -0.80f}},
+    {{4.48f, 3.20f, -2.72f}, {0.32f, 2.80f, -3.52f}},
+    {{1.92f, 3.20f, -2.24f}, {8.80f, 2.88f, -3.20f}},
 };
 constexpr int kNumInteriorPoints = sizeof(kInteriorKeyframes) / sizeof(kInteriorKeyframes[0]);
 
@@ -102,7 +102,7 @@ Vec3 catmullRom(const Vec3& p0, const Vec3& p1, const Vec3& p2, const Vec3& p3, 
 
 CameraPath::CameraPath() {
     buildLoop(loops_[0], kExteriorKeyframes, kNumExteriorPoints, 2.4f, 1.5f);
-    buildLoop(loops_[1], kInteriorKeyframes, kNumInteriorPoints, 0.75f, 0.45f);
+    buildLoop(loops_[1], kInteriorKeyframes, kNumInteriorPoints, 1.2f, 0.72f);
 }
 
 void CameraPath::buildLoop(Loop& loop, const Keyframe* keyframes, int count, float speed, float smoothWindow) {
