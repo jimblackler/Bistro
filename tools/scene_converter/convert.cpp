@@ -164,7 +164,100 @@ public:
         return true;
     }
 
+    void addCurtainWindowGlass() {
+        auto itCurtain = materialByName_.find("MASTER_Curtains");
+        auto itGlass = materialByName_.find("MASTER_Glass_Exterior");
+        if (itCurtain == materialByName_.end() || itGlass == materialByName_.end()) return;
+        uint32_t curtainMat = itCurtain->second;
+        uint32_t glassMat = itGlass->second;
+
+        // Collect existing exterior glass triangle centroids so we don't double-up panes on Paris_Building_01.
+        std::vector<Vec3> existingGlass;
+        for (size_t m = 0; m < materials_.size(); ++m) {
+            if (classifyAlpha(materials_[m]) != bistro::kAlphaBlend) continue;
+            const MaterialGeometry& g = geometry_[m];
+            for (size_t t = 0; t + 2 < g.indices.size(); t += 3) {
+                Vec3 c = (g.vertices[g.indices[t]].pos + g.vertices[g.indices[t + 1]].pos +
+                          g.vertices[g.indices[t + 2]].pos) *
+                         (1.0f / 3.0f);
+                existingGlass.push_back(c);
+            }
+        }
+
+        const MaterialGeometry& src = geometry_[curtainMat];
+        MaterialGeometry& dst = geometry_[glassMat];
+        size_t addedTris = 0;
+        for (size_t t = 0; t + 2 < src.indices.size(); t += 3) {
+            const FullVertex& v0 = src.vertices[src.indices[t]];
+            const FullVertex& v1 = src.vertices[src.indices[t + 1]];
+            const FullVertex& v2 = src.vertices[src.indices[t + 2]];
+            Vec3 c = (v0.pos + v1.pos + v2.pos) * (1.0f / 3.0f);
+            bool hasPane = false;
+            for (const Vec3& eg : existingGlass) {
+                Vec3 d = c - eg;
+                if (dot(d, d) < 0.35f * 0.35f) {
+                    hasPane = true;
+                    break;
+                }
+            }
+            if (hasPane) continue;
+            uint32_t base = static_cast<uint32_t>(dst.vertices.size());
+            dst.vertices.push_back(v0);
+            dst.vertices.push_back(v1);
+            dst.vertices.push_back(v2);
+            dst.indices.push_back(base);
+            dst.indices.push_back(base + 1);
+            dst.indices.push_back(base + 2);
+            addedTris++;
+        }
+
+        // Also add exterior glass panes across the 6 ground-floor shopfront display windows
+        // (Boulangerie, Tie Shop, and Librairie) that were left unglazed in BistroExterior.fbx.
+        struct StorefrontPane {
+            float x0, z0, x1, z1, y0, y1;
+            float nx, nz;
+        };
+        const StorefrontPane kStorefrontPanes[] = {
+            // Boulangerie right & left display windows
+            {4.50f, -17.54f, 6.83f, -20.42f, 1.99f, 4.40f, -0.78f, -0.62f},
+            {10.30f, -24.73f, 12.63f, -27.61f, 1.99f, 4.40f, -0.78f, -0.62f},
+            // Librairie right & left display windows
+            {16.03f, -32.73f, 17.53f, -34.24f, 1.24f, 4.45f, -0.71f, -0.70f},
+            {18.52f, -35.88f, 20.16f, -38.41f, 1.24f, 4.45f, -0.84f, -0.54f},
+            // Tie Shop right & left display windows
+            {4.52f, -42.48f, 6.48f, -44.82f, 1.52f, 3.70f, 0.77f, 0.64f},
+            {7.35f, -45.65f, 11.80f, -51.40f, 1.52f, 3.70f, 0.79f, 0.61f},
+        };
+        for (const auto& sp : kStorefrontPanes) {
+            Vec3 n = normalize({sp.nx, 0.0f, sp.nz});
+            Vec3 t = normalize({-n.z, 0.0f, n.x});
+            FullVertex q[4]{};
+            q[0].pos = {sp.x0, sp.y0, sp.z0};
+            q[1].pos = {sp.x1, sp.y0, sp.z1};
+            q[2].pos = {sp.x1, sp.y1, sp.z1};
+            q[3].pos = {sp.x0, sp.y1, sp.z0};
+            for (int i = 0; i < 4; ++i) {
+                q[i].normal = n;
+                q[i].tangent = t;
+                q[i].tangentSign = 1.0f;
+                q[i].uv[0] = (i == 1 || i == 2) ? 1.0f : 0.0f;
+                q[i].uv[1] = (i >= 2) ? 1.0f : 0.0f;
+            }
+            uint32_t base = static_cast<uint32_t>(dst.vertices.size());
+            for (int i = 0; i < 4; ++i) dst.vertices.push_back(q[i]);
+            dst.indices.push_back(base + 0);
+            dst.indices.push_back(base + 1);
+            dst.indices.push_back(base + 2);
+            dst.indices.push_back(base + 0);
+            dst.indices.push_back(base + 2);
+            dst.indices.push_back(base + 3);
+            addedTris += 2;
+        }
+        printf("  added %zu window glass triangles over MASTER_Curtains and storefronts\n", addedTris);
+    }
+
     void bakeSkyVisibility(int rays, float maxDistance) {
+        addCurtainWindowGlass();
         auto t0 = std::chrono::steady_clock::now();
         std::vector<skyvis::Triangle> tris;
         for (size_t m = 0; m < materials_.size(); ++m) {
@@ -333,18 +426,51 @@ public:
                 r.emissiveFactor[0] = r.emissiveFactor[1] = r.emissiveFactor[2] = 1.0f;
             }
             if (r.alphaMode == bistro::kAlphaBlend) {
+                // Ensure all glass surfaces (windows, bottles, glassware, display cases) are mirror-smooth
+                // rather than inheriting the 0.737 placeholder roughness from constant 16x16 Specular maps.
+                r.roughnessFactor = containsCI(m.name, "Dirty") ? 0.08f : 0.04f;
+                r.metallicFactor = 0.0f;
                 // The Bistro glass was authored for path tracing (specular transmission) and its base colour
                 // textures are fully opaque. Give it a raster-friendly opacity so windows are see-through.
                 auto st = stats_.all.find(m.baseColor);
                 bool textureHasAlpha =
                     st != stats_.all.end() && (st->second.translucent > 0.01f || st->second.cutout > 0.01f);
                 if (!textureHasAlpha) {
-                    float alpha = 0.16f;
-                    if (containsCI(m.name, "Frosted") || containsCI(m.name, "Frozen")) alpha = 0.7f;
-                    else if (containsCI(m.name, "Dirty")) alpha = 0.3f;
+                    float alpha = 0.14f;
+                    if (containsCI(m.name, "Dirty")) alpha = 0.24f;
                     else if (containsCI(m.name, "Emissive")) alpha = 0.6f;
-                    else if (containsCI(m.name, "Bottle") || containsCI(m.name, "Wine")) alpha = 0.45f;
+                    else if (containsCI(m.name, "Bottle") || containsCI(m.name, "Wine")) alpha = 0.42f;
                     r.baseColorFactor[3] = alpha;
+                }
+            } else if (containsCI(m.name, "Frosted") || containsCI(m.name, "Frozen")) {
+                // Opaque frosted glass on unbacked exterior doors/transoms: dark tinted glossy glass.
+                r.roughnessFactor = 0.08f;
+                r.metallicFactor = 0.0f;
+                r.baseColorFactor[0] = 0.22f;
+                r.baseColorFactor[1] = 0.25f;
+                r.baseColorFactor[2] = 0.27f;
+            } else if (r.alphaMode == bistro::kAlphaOpaque && !(r.flags & bistro::kMaterialEmissive)) {
+                auto st = stats_.all.find(m.baseColor);
+                if (st != stats_.all.end() && st->second.maxStdDev < 0.01f &&
+                    st->second.mean[0] < 0.01f && st->second.mean[1] < 0.01f && st->second.mean[2] < 0.01f) {
+                    // Replace 16x16 all-zero black placeholder BaseColor textures with realistic colours.
+                    r.baseColorTexture = -1;
+                    if (containsCI(m.name, "Rollup_Door")) {
+                        r.baseColorFactor[0] = 0.36f;
+                        r.baseColorFactor[1] = 0.39f;
+                        r.baseColorFactor[2] = 0.42f;
+                        r.roughnessFactor = 0.45f;
+                        r.metallicFactor = 0.70f;
+                    } else if (containsCI(m.name, "Toffee")) {
+                        r.baseColorFactor[0] = 0.55f;
+                        r.baseColorFactor[1] = 0.32f;
+                        r.baseColorFactor[2] = 0.14f;
+                        r.roughnessFactor = 0.35f;
+                    } else {
+                        r.baseColorFactor[0] = 0.24f;
+                        r.baseColorFactor[1] = 0.24f;
+                        r.baseColorFactor[2] = 0.26f;
+                    }
                 }
             }
             if (r.alphaMode == bistro::kAlphaMask) maskCount++;

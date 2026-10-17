@@ -71,8 +71,14 @@ float sampleShadow(vec3 worldPos, vec3 geomNormal, float NdotL) {
 }
 
 vec3 sampleEnvSpecular(vec3 R, float roughness) {
-    float lod = roughness * 5.0;
-    return textureLod(envSpecular, equirectUV(worldToEnv(R)), lod).rgb;
+    vec2 uv = equirectUV(worldToEnv(R));
+    vec3 prefiltered = textureLod(envSpecular, uv, roughness * 5.0).rgb;
+    if (roughness < 0.25) {
+        // Sample the full-resolution 2048x1024 HDR sky mip chain for mirror-smooth glass and chrome.
+        vec3 sharp = textureLod(skyTexture, uv, roughness * 6.0).rgb;
+        return mix(sharp, prefiltered, smoothstep(0.03, 0.25, roughness));
+    }
+    return prefiltered;
 }
 
 void main() {
@@ -101,13 +107,18 @@ void main() {
 
     vec4 nt = texture(textures[nonuniformEXT(m.normalTexture)], inUV);
     vec2 nxy = vec2(nt.r, nt.a) * 2.0 - 1.0;
+    if (ALPHA_MODE == 2u) {
+        // Subtle low-frequency pane warp so reflections shimmer naturally across flat French window glass.
+        nxy += vec2(sin(inWorldPos.x * 2.7 + inWorldPos.z * 2.3),
+                    cos(inWorldPos.y * 3.1 - inWorldPos.x * 1.9 + inWorldPos.z * 1.7)) * 0.018;
+    }
     float nz = sqrt(clamp(1.0 - dot(nxy, nxy), 0.0, 1.0));
     vec3 N = normalize(T * nxy.x + B * nxy.y + geomN * nz);
 
     // The Bistro's "Specular" maps pack roughness (G) and metalness (B); R is unused (always 0).
     vec3 orm = (m.flags & 4u) != 0u ? texture(textures[nonuniformEXT(m.ormTexture)], inUV).rgb : vec3(1.0);
     float ao = 1.0;
-    float roughness = clamp(orm.g * m.roughnessFactor, 0.045, 1.0);
+    float roughness = clamp(orm.g * m.roughnessFactor, 0.04, 1.0);
     float metallic = clamp(orm.b * m.metallicFactor, 0.0, 1.0);
     float a = roughness * roughness;
 
@@ -121,6 +132,7 @@ void main() {
     float NdotL = clamp(dot(N, L), 0.0, 1.0);
     float geomNdotL = dot(geomN, L);
     vec3 color = vec3(0.0);
+    vec3 specDirect = vec3(0.0);
     if (NdotL > 0.0 && geomNdotL > -0.05) {
         float shadow = sampleShadow(inWorldPos, geomN, clamp(geomNdotL, 0.0, 1.0));
         vec3 H = normalize(V + L);
@@ -129,7 +141,9 @@ void main() {
         vec3 F = F_Schlick(f0, VdotH);
         vec3 spec = D_GGX(NdotH, a) * V_SmithGGXCorrelated(NdotV, NdotL, a) * F;
         vec3 diff = diffuseColor * (1.0 / PI) * (1.0 - F);
-        color += (diff + spec) * frame.sunColor.rgb * NdotL * shadow;
+        vec3 sunRadiance = frame.sunColor.rgb * NdotL * shadow;
+        color += (diff + spec) * sunRadiance;
+        specDirect += spec * sunRadiance;
     }
 
     // --- Point lights (interior lamps) ---
@@ -147,7 +161,9 @@ void main() {
         vec3 H = normalize(V + Lp);
         vec3 F = F_Schlick(f0, clamp(dot(V, H), 0.0, 1.0));
         vec3 spec = D_GGX(clamp(dot(N, H), 0.0, 1.0), a) * V_SmithGGXCorrelated(NdotV, nl, a) * F;
-        color += (diffuseColor * (1.0 / PI) * (1.0 - F) + spec) * pl.color.rgb * nl * falloff;
+        vec3 lightRadiance = pl.color.rgb * nl * falloff;
+        color += (diffuseColor * (1.0 / PI) * (1.0 - F) + spec) * lightRadiance;
+        specDirect += spec * lightRadiance;
     }
 
     // --- Image based ambient lighting, occluded by baked sky visibility and material AO ---
@@ -161,7 +177,17 @@ void main() {
     vec3 R = reflect(-V, N);
     float specOcclusion = clamp(pow(NdotV + diffuseOcclusion, exp2(-16.0 * roughness - 1.0)) - 1.0 + diffuseOcclusion,
                                 0.0, 1.0);
+    if (roughness < 0.15 && metallic < 0.1) {
+        // Keep glossy dielectric glass (frosted doors/transoms) reflective even when recessed in door frames.
+        specOcclusion = max(specOcclusion, 0.75);
+    }
+    vec3 Rglass = normalize(vec3(R.x, clamp(R.y * 0.65 + 0.26, 0.05, 0.90), R.z));
     vec3 envSpec = sampleEnvSpecular(R, roughness) * frame.envRotation.w;
+    vec3 canyonSpec = envSpec;
+    if (roughness < 0.15 && metallic < 0.1) {
+        canyonSpec = sampleEnvSpecular(Rglass, roughness) * frame.envRotation.w;
+        envSpec = mix(envSpec, canyonSpec, 0.85);
+    }
     color += envSpec * envBRDFApprox(f0, roughness, NdotV) * specOcclusion;
 
     // --- Emissive ---
@@ -175,13 +201,50 @@ void main() {
     float heightTerm = exp(-max(inWorldPos.y - frame.fogParams.z, 0.0) * frame.fogParams.y);
     float fog = min(1.0 - exp(-dist * frame.fogParams.x * heightTerm), frame.fogParams.w);
 
-    if (ALPHA_MODE == 2u) {
-        // Glass: premultiplied alpha. Reflections are added on top of the transmitted background.
-        float alpha = clamp(base.a, 0.0, 1.0);
-        vec3 reflection = envSpec * envBRDFApprox(f0, roughness, NdotV) * specOcclusion;
-        vec3 body = (color - reflection) * alpha + reflection;
+    bool isOpaqueGlass = (ALPHA_MODE == 0u && roughness < 0.10 && metallic < 0.10);
+    if (ALPHA_MODE == 2u || isOpaqueGlass) {
+        // Glass: premultiplied alpha. Separate curved 3D glassware/bottles (where geometric normals vary
+        // across triangles) from flat architectural window panes so each gets tailored reflection tuning.
+        bool isGlassware = !isOpaqueGlass &&
+                           ((m.baseColorFactor.a > 0.35 && m.baseColorFactor.a < 0.50) ||
+                            (length(fwidth(geomN)) > 0.012));
+        float alpha = isOpaqueGlass
+            ? 1.0
+            : (isGlassware ? clamp(base.a, 0.08, 0.14) : max(clamp(base.a, 0.0, 1.0), 0.14));
+        bool cameraIndoors = (frame.cameraPos.x > -0.2 && frame.cameraPos.x < 19.5 &&
+                              frame.cameraPos.z > -18.0 && frame.cameraPos.z < 6.0 &&
+                              frame.cameraPos.y < 4.5);
+
+        float cLum = max(luminance(canyonSpec), 1e-4);
+        float pLum = pow(cLum, 0.45);
+        float compressedLum = 1.65 * pLum / (1.0 + 0.35 * pLum);
+        vec3 glassEnv = canyonSpec * (compressedLum / cLum);
+        glassEnv = mix(glassEnv, vec3(compressedLum) * vec3(0.93, 0.97, 1.05), 0.30);
+
+        // Boost mid-angle Fresnel on flat window panes so street-side shopfronts clearly reflect
+        // opposite buildings while remaining transparent when viewed straight-on.
+        float fresnelCurve = isGlassware ? pow(1.0 - NdotV, 2.4) : pow(1.0 - NdotV, 1.65);
+        vec3 F_glass = mix(vec3(0.08), vec3(isGlassware ? 0.85 : 0.78), fresnelCurve);
+
+        if (cameraIndoors || (isGlassware && skyVis < 0.15)) {
+            // Inside the restaurant, flat windows looking out reflect the dim indoor room subtly while
+            // curved wine glasses, tumblers, jars, and bottles keep crisp crystal rim reflections.
+            float indoorScale = isGlassware ? 0.55 : 0.07;
+            glassEnv *= indoorScale * vec3(1.0, 0.90, 0.76);
+        }
+        if (!gl_FrontFacing && !isOpaqueGlass) {
+            // Attenuate the inner walls of hollow glassware/bottles and indoor double-pane windows,
+            // while keeping single-pane exterior windows bright regardless of FBX winding.
+            float backScale = isGlassware ? 0.30 : (cameraIndoors ? 0.50 : 0.85);
+            F_glass *= backScale;
+            specDirect *= backScale;
+        }
+        vec3 clampedSpecDirect = specDirect / (1.0 + luminance(specDirect) * 0.25);
+        vec3 reflection = glassEnv * F_glass + clampedSpecDirect;
+        vec3 diffOnly = max(color - specDirect - envSpec * envBRDFApprox(f0, roughness, NdotV) * specOcclusion, vec3(0.0));
+        vec3 body = diffOnly * alpha * (1.0 - F_glass) + reflection;
         body = mix(body, frame.fogColor.rgb * alpha, fog);
-        float fresnelAlpha = clamp(alpha + luminance(envBRDFApprox(vec3(0.04), roughness, NdotV)), 0.0, 1.0);
+        float fresnelAlpha = isOpaqueGlass ? 1.0 : clamp(alpha + luminance(F_glass) * 0.65, 0.0, 1.0);
         outColor = vec4(body, fresnelAlpha);
     } else {
         color = mix(color, frame.fogColor.rgb, fog);
