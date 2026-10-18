@@ -110,7 +110,7 @@ Vec3 catmullRom(const Vec3& p0, const Vec3& p1, const Vec3& p2, const Vec3& p3, 
 }  // namespace
 
 CameraPath::CameraPath() {
-    buildLoop(loops_[0], kExteriorKeyframes, kNumExteriorPoints, 2.4f, 1.5f);
+    buildLoop(loops_[0], kExteriorKeyframes, kNumExteriorPoints, 4.8f, 1.1f);
     buildLoop(loops_[1], kInteriorKeyframes, kNumInteriorPoints, 1.2f, 0.72f);
 }
 
