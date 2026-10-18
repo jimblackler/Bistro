@@ -9,33 +9,42 @@ namespace {
 // both the camera eye position and a look-at target so that through turnarounds the camera looks back
 // down the street or across the bistro terrace rather than toward the unmodeled outer edges of the asset.
 const CameraPath::Keyframe kExteriorKeyframes[] = {
-    // Plaza: sweep from the north side of the plaza down toward the archway and street.
-    {{61.0f, 5.5f, 30.0f}, {38.0f, 4.0f, 27.5f}},
-    {{50.0f, 4.3f, 31.0f}, {26.0f, 3.4f, 23.0f}},
-    {{40.0f, 3.8f, 28.5f}, {16.0f, 3.0f, 19.0f}},
-    {{28.0f, 3.4f, 23.5f}, {6.0f, 2.8f, 14.5f}},
-    {{16.0f, 3.1f, 19.5f}, {-5.0f, 2.8f, 11.5f}},
-    {{6.5f, 3.0f, 14.5f}, {-10.0f, 3.0f, 6.0f}},
-    {{-5.0f, 3.0f, 11.5f}, {-14.0f, 3.2f, -4.0f}},
-    {{-11.0f, 3.1f, 5.5f}, {-12.0f, 3.4f, -10.0f}},
-    // Low pass up the long north street, looking up the street between the facades.
-    {{-14.0f, 3.3f, -6.0f}, {-4.0f, 3.6f, -18.0f}},
-    {{-5.0f, 3.5f, -16.0f}, {6.0f, 3.8f, -29.0f}},
-    {{4.0f, 3.6f, -27.0f}, {14.0f, 4.0f, -40.0f}},
-    {{12.5f, 3.7f, -37.5f}, {21.0f, 4.2f, -51.0f}},
-    // As we reach the north end, pan smoothly across the east facade and back down the street
-    // (avoiding looking past the west facade where the asset ends at z = -55).
-    {{18.5f, 3.9f, -46.5f}, {25.0f, 4.5f, -55.0f}},
-    {{21.0f, 4.2f, -51.5f}, {23.0f, 4.6f, -42.0f}},
-    {{19.5f, 4.5f, -48.5f}, {10.0f, 4.2f, -35.0f}},
-    // Return pass down the long street at first-floor height, looking south toward the bistro corner.
-    {{12.5f, 4.8f, -39.0f}, {1.0f, 4.0f, -24.0f}},
-    {{4.5f, 5.0f, -28.0f}, {-8.0f, 3.8f, -13.0f}},
-    {{-3.5f, 4.8f, -18.0f}, {-13.0f, 3.6f, -4.0f}},
-    {{-14.0f, 4.4f, -7.0f}, {-11.0f, 3.5f, 6.0f}},
-    // Round the bistro corner and glide east along the terrace toward the archway and plaza.
-    {{-12.0f, 3.8f, 1.5f}, {-2.0f, 3.5f, 13.0f}},
-    {{-7.5f, 4.0f, 10.5f}, {10.0f, 4.0f, 18.0f}},
+    // Plaza into East Street, turning right to look at the East Street Book Store window.
+    {{61.0f, 5.5f, 30.0f}, {48.0f, 3.5f, 24.5f}},
+    {{50.0f, 4.3f, 31.0f}, {53.0f, 2.6f, 22.0f}},
+    // Turn left to look at the East Street Boulangerie / Bakery storefront window.
+    {{40.0f, 3.8f, 28.5f}, {39.0f, 2.6f, 38.5f}},
+    {{28.0f, 3.4f, 23.5f}, {14.0f, 2.8f, 17.5f}},
+    // Pass under the archway and turn right toward the Bistro East Terrace tables and menu board.
+    {{16.0f, 3.1f, 19.5f}, {4.0f, 2.0f, 9.5f}},
+    {{6.5f, 3.0f, 14.5f}, {-1.5f, 1.8f, 7.0f}},
+    // Round the Bistro corner, looking at the Blue Vespa scooter and Le Petit Coin corner entrance.
+    {{-5.0f, 3.0f, 11.5f}, {-7.8f, 1.5f, 0.2f}},
+    {{-11.0f, 3.1f, 5.5f}, {-2.5f, 2.4f, -2.0f}},
+    // Enter North Street, glancing at the West Terrace tables and lit Bistro windows.
+    {{-13.5f, 3.2f, -5.5f}, {-1.5f, 2.2f, -9.5f}},
+    // Turn right to look into the North Street Boulangerie / Patisserie display windows.
+    {{-4.5f, 3.2f, -15.5f}, {6.5f, 2.7f, -19.8f}},
+    {{2.5f, 3.2f, -23.5f}, {11.8f, 2.8f, -26.2f}},
+    // Turn right to look into the Librairie / Book Store display windows.
+    {{9.5f, 3.2f, -31.5f}, {17.2f, 2.6f, -33.8f}},
+    {{13.0f, 3.3f, -36.5f}, {19.2f, 2.6f, -36.8f}},
+    // Turn left across the street to look into the West Side shop display windows.
+    {{16.0f, 3.4f, -42.5f}, {5.8f, 2.6f, -43.8f}},
+    {{18.5f, 3.6f, -47.0f}, {9.5f, 2.8f, -48.0f}},
+    // North end turnaround: pan smoothly across the east facade while beginning to climb.
+    {{20.5f, 4.4f, -50.5f}, {24.0f, 5.0f, -45.0f}},
+    {{19.0f, 6.8f, -47.5f}, {12.0f, 8.0f, -34.0f}},
+    // Return journey: rise up to top-storey height, looking at the upper balconies and Bistro turret.
+    {{12.5f, 10.5f, -37.0f}, {6.0f, 12.0f, -22.0f}},
+    {{4.5f, 14.5f, -24.0f}, {2.0f, 14.0f, -9.0f}},
+    {{-6.0f, 18.8f, -9.0f}, {-2.0f, 14.0f, 3.0f}},
+    // Fly across the top-storey outdoor terrace above the south building, looking over its iron railing.
+    {{-16.2f, 21.5f, 7.5f}, {-10.0f, 16.5f, 14.0f}},
+    {{-15.8f, 21.4f, 11.5f}, {-3.0f, 13.5f, 11.0f}},
+    {{-11.0f, 21.5f, 15.0f}, {4.0f, 10.5f, 15.0f}},
+    // Swoop down from the top-storey terrace over the intersection to pass under the archway.
+    {{-5.5f, 14.0f, 14.5f}, {10.0f, 6.0f, 17.5f}},
     {{5.5f, 4.6f, 16.5f}, {24.0f, 4.5f, 23.0f}},
     {{16.5f, 5.2f, 19.5f}, {36.0f, 5.0f, 26.5f}},
     {{28.0f, 5.8f, 24.0f}, {48.0f, 5.5f, 29.0f}},
