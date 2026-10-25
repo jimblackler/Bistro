@@ -166,11 +166,11 @@ MATERIALS = {
         0.85,
     ),
     'MI_QueenPalm_OldBranches': (
-        'textures/Trees/PX_Imperata_Cylindrica_Leaf_01_Albedo_Processed.png',
+        'textures/Trees/PX_Imperata_cylindrica_Leaf_01_BaseColor.png',
         'textures/Trees/PX_Imperata_cylindrica_Leaf_01_normal.jpg',
         'textures/Trees/PX_Imperata_cylindrica_Leaf_01_roughness.jpg',
-        False,
-        'OPAQUE',
+        True,
+        'MASK',
         [1.0, 1.0, 1.0, 1.0],
         0.85,
     ),
@@ -505,13 +505,11 @@ def decimate_triangles(pos, nrm, st, grid_size):
 
 
 def dedupe_triangles(pos, nrm, st):
-    """Removes coincident duplicate triangles.
+    """Removes coincident duplicate triangles and coplanar folded triangles sharing an edge.
 
-    The Jungle Ruins USD foliage contains many exactly overlapping triangles (and vertex clustering creates
-    more). Coincident triangles z-fight, and because the GPU culling pass appends draws in a different order
-    every frame, the winner changes from frame to frame, which shows up as shimmering leaves and bark.
-    The key ignores winding: the renderer draws with back-face culling disabled (the shader flips the normal
-    for back faces), so opposite-winding copies fight just the same and either copy renders both sides.
+    The Jungle Ruins USD foliage contains many overlapping triangles (and vertex clustering creates
+    coplanar diagonal overlaps on flat leaf quads). Coincident or coplanar overlapping triangles z-fight
+    across parallel TBDR tile processors, which shows up as shimmering leaves and bark.
     """
     n_tri = len(pos) // 3
     if n_tri < 2:
@@ -521,12 +519,52 @@ def dedupe_triangles(pos, nrm, st):
     key = np.take_along_axis(q, order[:, :, None], axis=1).reshape(n_tri, 9)
     key_view = np.ascontiguousarray(key).view(np.dtype((np.void, key.dtype.itemsize * 9))).ravel()
     _, keep = np.unique(key_view, return_index=True)
-    if len(keep) == n_tri:
-        return pos, nrm, st
     keep.sort()
-    return (pos.reshape(n_tri, 3, 3)[keep].reshape(-1, 3),
-            nrm.reshape(n_tri, 3, 3)[keep].reshape(-1, 3),
-            st.reshape(n_tri, 3, 2)[keep].reshape(-1, 2))
+    tris = pos.reshape(n_tri, 3, 3)[keep]
+    nrms = nrm.reshape(n_tri, 3, 3)[keep]
+    sts = st.reshape(n_tri, 3, 2)[keep]
+    n_tri = len(tris)
+    if n_tri < 2:
+        return tris.reshape(-1, 3), nrms.reshape(-1, 3), sts.reshape(-1, 2)
+
+    v0, v1, v2 = tris[:, 0], tris[:, 1], tris[:, 2]
+    fn = np.cross(v1 - v0, v2 - v0)
+    area2 = np.linalg.norm(fn, axis=1)
+    alive = area2 > 1e-6
+    fn_u = fn / np.maximum(area2[:, None], 1e-12)
+
+    qv = np.round(tris.reshape(-1, 3) * 1000.0).astype(np.int64)
+    _, inv_v = np.unique(qv, axis=0, return_inverse=True)
+    idx = inv_v.ravel().reshape(n_tri, 3)
+    s_order = np.argsort(idx, axis=1)
+    s_idx = np.take_along_axis(idx, s_order, axis=1)
+    s_pos = np.take_along_axis(tris, s_order[:, :, None], axis=1)
+
+    for p0, p1, p2 in [(0, 1, 2), (1, 2, 0), (0, 2, 1)]:
+        e = s_idx[:, [p0, p1]]
+        ek = e[:, 0].astype(np.int64) * 10000000 + e[:, 1].astype(np.int64)
+        eo = np.argsort(ek, kind='mergesort')
+        ek_s = ek[eo]
+        for step in (1, 2, 3):
+            if len(eo) <= step:
+                continue
+            same_e = ek_s[step:] == ek_s[:-step]
+            ta = eo[:-step][same_e]
+            tb = eo[step:][same_e]
+            cos_n = np.abs(np.einsum('ij,ij->i', fn_u[ta], fn_u[tb]))
+            va = s_pos[ta, p0]
+            vb = s_pos[ta, p1]
+            vca = s_pos[ta, p2]
+            vcb = s_pos[tb, p2]
+            ab = vb - va
+            ab_u = ab / np.maximum(np.linalg.norm(ab, axis=1, keepdims=True), 1e-12)
+            pa = (vca - va) - ab_u * np.einsum('ij,ij->i', vca - va, ab_u)[:, None]
+            pb = (vcb - va) - ab_u * np.einsum('ij,ij->i', vcb - va, ab_u)[:, None]
+            same_side = np.einsum('ij,ij->i', pa, pb) > 0.0
+            drop = (cos_n > 0.98) & same_side & alive[ta]
+            alive[tb[drop]] = False
+
+    return tris[alive].reshape(-1, 3), nrms[alive].reshape(-1, 3), sts[alive].reshape(-1, 2)
 
 
 def weld_coincident_xy(pos_list, cell):
@@ -867,6 +905,7 @@ def main():
             pos = np.concatenate([c[0] for c in chunks], axis=0)
             nrm = np.concatenate([c[1] for c in chunks], axis=0)
             uv = np.concatenate([c[2] for c in chunks], axis=0)
+            pos, nrm, uv = dedupe_triangles(pos, nrm, uv)
             indexed = index_triangles(pos, nrm, uv)
             if indexed is None:
                 continue

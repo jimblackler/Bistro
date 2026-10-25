@@ -50,19 +50,25 @@ void main() {
 
     // Neighbourhood statistics and nearest depth (dilates edges so silhouettes reproject correctly).
     vec3 cur = vec3(0.0);
+    vec3 curTent = vec3(0.0);
     vec3 m1 = vec3(0.0), m2 = vec3(0.0);
     vec3 mn = vec3(1e9), mx = vec3(-1e9);
     float nearestDepth = 0.0;
+    float farthestDepth = 1.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             ivec2 q = clamp(p + ivec2(x, y), ivec2(0), size - 1);
             vec3 c = toYCoCg(compress(texelFetch(currentColor, q, 0).rgb));
             if (x == 0 && y == 0) cur = c;
+            float tw = (x == 0 && y == 0) ? 0.25 : ((x == 0 || y == 0) ? 0.125 : 0.0625);
+            curTent += c * tw;
             m1 += c;
             m2 += c * c;
             mn = min(mn, c);
             mx = max(mx, c);
-            nearestDepth = max(nearestDepth, texelFetch(sceneDepth, q, 0).r);  // reversed-Z
+            float d = texelFetch(sceneDepth, q, 0).r;  // reversed-Z
+            nearestDepth = max(nearestDepth, d);
+            farthestDepth = min(farthestDepth, d);
         }
     }
 
@@ -71,8 +77,8 @@ void main() {
         return;
     }
 
-    // Reproject (clip space -> previous frame clip space). Works for the sky (depth 0) too.
-    vec2 ndc = inUV * 2.0 - 1.0 - frame.taaParams.xy;
+    // Reproject unjittered pixel center into the previous frame's unjittered clip space.
+    vec2 ndc = inUV * 2.0 - 1.0;
     vec4 prevClip = frame.reprojection * vec4(ndc, nearestDepth, 1.0);
     vec2 prevUV = prevClip.xy / prevClip.w * 0.5 + 0.5;
     if (prevClip.w <= 0.0 || any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0)))) {
@@ -81,22 +87,36 @@ void main() {
     }
 
     vec3 hist = toYCoCg(compress(sampleHistory(prevUV, texSize)));
+    vec2 velocityPx = (inUV - prevUV) * texSize;
+    float speed = length(velocityPx);
 
-    // Variance clipping, intersected with the min/max box.
+    // Variance clipping, intersected with the min/max box (wider when slow so 8x Halton jitter
+    // accumulates cleanly on sub-pixel grilles, thin lines, and alpha-cutout foliage).
     vec3 mean = m1 / 9.0;
     vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
-    vec3 boxMin = max(mn, mean - 1.25 * sigma);
-    vec3 boxMax = min(mx, mean + 1.25 * sigma);
+    float depthJump = (nearestDepth - farthestDepth) / max(nearestDepth, 1e-5);
+    float silhouette = smoothstep(0.15, 0.50, depthJump);
+    // Soften single-pixel jitter steps on high-contrast sub-pixel edges and alpha-cutout silhouettes.
+    float tentMix = max(smoothstep(0.02, 0.10, sigma.x) * 0.45, silhouette * 0.65);
+    cur = mix(cur, curTent, tentMix);
+    float gamma = mix(1.65, 1.25, clamp(speed / 2.0, 0.0, 1.0)) + silhouette * 0.5;
+    float slowFactor = 1.0 - clamp(speed / 1.5, 0.0, 1.0);
+    vec3 slack = vec3(silhouette * slowFactor * 0.06, 0.01, 0.01);
+    vec3 boxMin = max(mn - slack, mean - gamma * sigma);
+    vec3 boxMax = min(mx + slack, mean + gamma * sigma);
     vec3 center = 0.5 * (boxMax + boxMin);
     vec3 extents = max(0.5 * (boxMax - boxMin), vec3(1e-5));
     vec3 offset = hist - center;
     vec3 ts = abs(offset / extents);
     float t = max(ts.x, max(ts.y, ts.z));
-    if (t > 1.0) hist = center + offset / t;
+    if (t > 1.0) {
+        vec3 clippedHist = center + offset / t;
+        float clipStrength = mix(0.18, 1.0, clamp(speed / 2.5, 0.0, 1.0));
+        hist = mix(hist, clippedHist, clipStrength);
+    }
 
     // Blend: more current frame when the camera moved a lot (sub-pixel velocity reduces blur).
-    vec2 velocityPx = (inUV - prevUV) * texSize;
-    float feedback = mix(frame.taaParams.z, frame.taaParams.z - 0.08, clamp(length(velocityPx) / 8.0, 0.0, 1.0));
+    float feedback = mix(frame.taaParams.z, frame.taaParams.z - 0.08, clamp(speed / 8.0, 0.0, 1.0));
     vec3 result = mix(cur, hist, feedback);
     outColor = vec4(decompress(fromYCoCg(result)), 1.0);
 }

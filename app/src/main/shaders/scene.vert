@@ -18,10 +18,17 @@ layout(location = 4) out mediump float outSkyVisibility;
 
 void main() {
     // firstInstance of each indirect draw carries the cluster index.
-    outMaterial = clusters[gl_InstanceIndex].materialIndex;
+    Cluster cl = clusters[gl_InstanceIndex];
+    outMaterial = cl.materialIndex;
     outNormal = octDecode(inNormal);
     outTangent = vec4(inTangent.xyz, inTangent.w < 0.0 ? -1.0 : 1.0);
     outUV = inUV;
     outSkyVisibility = inExtra.x;
-    gl_Position = frame.viewProj * vec4(inPosition, 1.0);
+    vec4 clip = frame.viewProj * vec4(inPosition, 1.0);
+    if (cl.bucket == 1u) {
+        // Keep alpha-tested foliage on the unjittered grid so sub-pixel leaves and canopy cutouts
+        // do not binary-flip in and out of 1x pixel centers every frame.
+        clip.xy -= frame.taaParams.xy * clip.w;
+    }
+    gl_Position = clip;
 }

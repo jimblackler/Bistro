@@ -45,7 +45,7 @@ bool occludedByHiZ(vec3 mn, vec3 mx) {
     float d2 = textureLod(hizTexture, vec2(smin.x, smax.y), level).r;
     float d3 = textureLod(hizTexture, vec2(smax.x, smax.y), level).r;
     float farthest = min(min(d0, d1), min(d2, d3));
-    return nearest < farthest;
+    return nearest * 1.02 + 2e-4 < farthest;
 }
 
 bool isClusterVisible(Cluster c) {
@@ -63,7 +63,9 @@ bool isClusterVisible(Cluster c) {
     float dist = distance(center, frame.cameraPos.xyz) - radius;
     if (dist > 0.0 && (radius / dist) * frame.cullParams.z < frame.cullParams.w) return false;
 
-    if (occludedByHiZ(c.aabbMin, c.aabbMax)) return false;
+    // Alpha-tested foliage canopies have sub-pixel cutouts that shift with TAA jitter; avoid
+    // Hi-Z culling on mask clusters so porous tree canopies never oscillate on/off between frames.
+    if (c.bucket != 1u && occludedByHiZ(c.aabbMin, c.aabbMax)) return false;
     return true;
 }
 

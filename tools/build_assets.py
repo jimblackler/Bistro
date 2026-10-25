@@ -138,6 +138,81 @@ def resize_to(img, max_dim):
     return img
 
 
+def nearest_pot(n, max_dim):
+    """Rounds n to the nearest power of two in [4, max_dim] so all Vulkan mip chains divide evenly."""
+    n = max(4, min(int(max_dim), int(n)))
+    return max(4, min(int(max_dim), 1 << int(round(math.log2(n)))))
+
+
+def resize_float(arr, target_h, target_w):
+    """Band-limited 32-bit float Lanczos resize across all channels."""
+    if arr.shape[0] == target_h and arr.shape[1] == target_w:
+        return arr
+    chans = [
+        np.asarray(
+            Image.fromarray(np.ascontiguousarray(arr[:, :, c]), mode='F').resize(
+                (target_w, target_h), Image.Resampling.LANCZOS
+            ),
+            dtype=np.float32,
+        )
+        for c in range(arr.shape[2])
+    ]
+    return np.stack(chans, axis=-1)
+
+
+def gaussian_1d(arr, sigma, axis):
+    """Applies a 1D Gaussian low-pass filter with standard deviation sigma along axis (0=Y, 1=X)."""
+    r = max(1, int(round(sigma * 3.0)))
+    x = np.arange(-r, r + 1, dtype=np.float32)
+    k = np.exp(-0.5 * (x / sigma) ** 2)
+    k /= k.sum()
+    pad = [(0, 0)] * arr.ndim
+    pad[axis] = (r, r)
+    padded = np.pad(arr, pad, mode='edge')
+    out = np.zeros_like(arr)
+    for i, w in enumerate(k):
+        sl = [slice(None)] * arr.ndim
+        sl[axis] = slice(i, i + arr.shape[axis])
+        out += w * padded[tuple(sl)]
+    return out
+
+
+def suppress_subblock_moire(arr, channels=3):
+    """Attenuates narrowband periodic stripes (grilles, scanlines, brick courses) whose wavelength at this
+    mip level is smaller than an ASTC block (<= 8 texels), preventing block-grid and screen moire."""
+    for axis in (0, 1):
+        dim = arr.shape[axis]
+        if dim < 32:
+            continue
+        prof = arr[:, :, :channels].mean(axis=1 - axis)
+        prof = prof - prof.mean(axis=0, keepdims=True)
+        spec = np.abs(np.fft.rfft(prof, axis=0)).max(axis=1) / dim
+        k_min = max(8, dim // 8)
+        if k_min >= len(spec):
+            continue
+        sub = spec[k_min:]
+        peak = float(sub.max())
+        med = float(np.median(sub)) + 1e-6
+        if peak > 0.0035 and peak / med > 7.5:
+            k_peak = k_min + int(np.argmax(sub))
+            wavelength = dim / float(k_peak)
+            sigma = max(0.75, 0.5 * wavelength)
+            arr = arr.copy()
+            arr[:, :, :channels] = gaussian_1d(arr[:, :, :channels], sigma, axis)
+    return arr
+
+
+def downsample_mip(arr, target_h, target_w, channels=3):
+    """Band-limited 2x mip step with gentle anti-aliasing near the new Nyquist frequency."""
+    out = resize_float(arr, target_h, target_w)
+    if min(target_h, target_w) >= 8:
+        out = out.copy()
+        for axis in (0, 1):
+            if out.shape[axis] >= 8:
+                out[:, :, :channels] = gaussian_1d(out[:, :, :channels], 0.48, axis)
+    return suppress_subblock_moire(out, channels=channels)
+
+
 def load_image(path):
     im = Image.open(path)
     im.load()
@@ -305,7 +380,8 @@ def coverage(alpha, cutoff=0.5):
 
 
 def preserve_coverage(alpha, target, cutoff=0.5):
-    """Scales alpha so that the fraction of texels passing the alpha test matches 'target'."""
+    """Scales alpha so that the fraction of texels passing the alpha test matches 'target',
+    and sharpens the transition around 'cutoff' so coarse mips don't hover near 0.5."""
     if target <= 0.0 or target >= 1.0:
         return alpha
     lo, hi = 0.0, 8.0
@@ -315,32 +391,50 @@ def preserve_coverage(alpha, target, cutoff=0.5):
             lo = mid
         else:
             hi = mid
-    return np.clip(alpha * hi, 0, 1)
+    scaled = np.clip(alpha * hi, 0, 1)
+    above = scaled >= cutoff
+    out = np.empty_like(scaled)
+    out[above] = cutoff + (1.0 - cutoff) * np.power(
+        np.clip((scaled[above] - cutoff) / max(1.0 - cutoff, 1e-4), 0.0, 1.0), 0.6
+    )
+    out[~above] = cutoff * np.power(
+        np.clip(scaled[~above] / max(cutoff, 1e-4), 0.0, 1.0), 1.6
+    )
+    return out
 
 
-def build_mips(img, kind, alpha_tested, name=''):
-    """Returns a list of uint8 RGBA mip levels."""
+def build_mips(img, kind, alpha_tested, name='', target_size=None):
+    """Returns a list of uint8 RGBA mip levels with band-limited filtering and exact Vulkan mip sizing."""
+    th, tw = target_size if target_size is not None else img.shape[:2]
     levels = []
     if kind in (KIND_BASECOLOR, KIND_EMISSIVE):
         lin = img.copy()
         lin[:, :, :3] = srgb_to_linear(img[:, :, :3])
-        target = coverage(img[:, :, 3]) if alpha_tested else None
-        cur = lin
+        target = coverage(lin[:, :, 3]) if alpha_tested else None
+        cur = suppress_subblock_moire(resize_float(lin, th, tw), channels=3)
+        mip_channels = 4 if alpha_tested else 3
         while True:
             out = cur.copy()
             out[:, :, :3] = linear_to_srgb(cur[:, :, :3])
             if alpha_tested and len(levels) > 0:
-                out[:, :, 3] = preserve_coverage(cur[:, :, 3], target)
+                mip_idx = len(levels)
+                mip_target = target
+                if target < 0.55:
+                    # Consolidate sparse sub-pixel leaflets at coarse mips so distant tree crowns
+                    # don't become a sieve of single-texel pinholes against the sky.
+                    mip_target = min(0.60, target + (0.60 - target) * min(1.0, mip_idx * 0.14))
+                out[:, :, 3] = preserve_coverage(cur[:, :, 3], mip_target)
             levels.append(out)
             if cur.shape[0] == 1 and cur.shape[1] == 1:
                 break
-            cur = downsample(cur)
+            cur = downsample_mip(cur, max(1, cur.shape[0] >> 1), max(1, cur.shape[1] >> 1), channels=mip_channels)
     elif kind == KIND_NORMAL:
         # BC5 / tangent normal map stores X,Y; reconstruct Z, filter as vectors and renormalise.
         x = img[:, :, 0] * 2 - 1
         y = img[:, :, 1] * 2 - 1
         z = np.sqrt(np.clip(1 - x * x - y * y, 0, 1))
         cur = np.stack([x, y, z], axis=-1)
+        cur = suppress_subblock_moire(resize_float(cur, th, tw), channels=3)
         while True:
             n = cur / np.maximum(np.linalg.norm(cur, axis=-1, keepdims=True), 1e-6)
             out = np.ones(cur.shape[:2] + (4,), dtype=np.float32)
@@ -348,7 +442,7 @@ def build_mips(img, kind, alpha_tested, name=''):
             levels.append(out)
             if cur.shape[0] == 1 and cur.shape[1] == 1:
                 break
-            cur = downsample(cur)
+            cur = downsample_mip(cur, max(1, cur.shape[0] >> 1), max(1, cur.shape[1] >> 1), channels=3)
     else:
         cur = img
         low = name.lower()
@@ -358,11 +452,12 @@ def build_mips(img, kind, alpha_tested, name=''):
             cur = img.copy()
             cur[:, :, 1] = img[:, :, 0]
             cur[:, :, 2] = 0.0
+        cur = suppress_subblock_moire(resize_float(cur, th, tw), channels=3)
         while True:
             levels.append(cur)
             if cur.shape[0] == 1 and cur.shape[1] == 1:
                 break
-            cur = downsample(cur)
+            cur = downsample_mip(cur, max(1, cur.shape[0] >> 1), max(1, cur.shape[1] >> 1), channels=3)
     return [np.clip(np.rint(l * 255), 0, 255).astype(np.uint8) for l in levels]
 
 
@@ -434,10 +529,14 @@ def texture_worker(args):
         return name, os.path.getsize(dst), True
     scale, block, srgb = KIND_SETTINGS[kind]
     img = load_image(src)
-    img = resize_to(img, max(4, int(max_size * scale)))
-    if max(img.shape[:2]) <= 64:
+    limit = max(4, int(max_size * scale))
+    h0, w0 = img.shape[:2]
+    s = min(1.0, limit / float(max(h0, w0)))
+    th = nearest_pot(h0 * s, limit)
+    tw = nearest_pot(w0 * s, limit)
+    if max(th, tw) <= 64:
         block = (4, 4)
-    levels = build_mips(img, kind, name in mask_names, name=name)
+    levels = build_mips(img, kind, name in mask_names, name=name, target_size=(th, tw))
     payloads = []
     with tempfile.TemporaryDirectory() as tmp:
         for i, lvl in enumerate(levels):
@@ -463,7 +562,7 @@ def texture_worker(args):
             with open(out, 'rb') as f:
                 data = f.read()
             payloads.append(data[16:])  # strip the 16-byte .astc header
-    write_tex(dst, FORMAT_ASTC, img.shape[1], img.shape[0], block, srgb, payloads)
+    write_tex(dst, FORMAT_ASTC, tw, th, block, srgb, payloads)
     return name, os.path.getsize(dst), False
 
 
