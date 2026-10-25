@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Overlays the camera path (parsed from camera_path.cpp) onto a top-down screenshot of the scene.
+"""Overlays the camera path (from environments/<env>/environment.json) onto a top-down screenshot of the scene.
 
 Usage:
-  1. adb shell am start -n com.android.demo.bistro/.MainActivity --es camera "EX,EY,EZ,TX,TY,TZ" --ez hud false
+  1. adb shell am start -n com.android.demo.bistro/.MainActivity --es env <env> --es camera "EX,EY,EZ,TX,TY,TZ" --ez hud false
      (e.g. "20,190,5,20,0,4.99" for a view straight down), then grab a screenshot.
-  2. tools/path_map.py screenshot.png out.png EX EY EZ TX TY TZ
+  2. tools/path_map.py screenshot.png out.png EX EY EZ TX TY TZ [--env <env>] [--loop <index>]
 """
+import json
 import math
 import os
-import re
 import sys
 
 import numpy as np
@@ -18,12 +18,31 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FOV_Y = math.radians(52.0)
 
 
-def control_points(array_name='kExteriorKeyframes'):
-    src = open(os.path.join(ROOT, 'app', 'src', 'main', 'cpp', 'camera_path.cpp')).read()
-    block = src[src.index(array_name + '[] = {'):]
-    block = block[:block.index('};')]
-    return [tuple(float(v.rstrip('f')) for v in m)
-            for m in re.findall(r'\{\{(-?[\d.]+f), (-?[\d.]+f), (-?[\d.]+f)\},', block)]
+def default_env_id():
+    env_root = os.path.join(ROOT, 'environments')
+    entries = []
+    if os.path.isdir(env_root):
+        for name in sorted(os.listdir(env_root)):
+            path = os.path.join(env_root, name, 'environment.json')
+            if os.path.isfile(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                entries.append((cfg.get('order', 0), cfg.get('id', name)))
+    entries.sort()
+    return entries[0][1] if entries else 'bistro'
+
+
+def control_points(env_id=None, loop_index=0):
+    if env_id is None:
+        env_id = default_env_id()
+    cfg_path = os.path.join(ROOT, 'environments', env_id, 'environment.json')
+    with open(cfg_path, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+    loops = cfg.get('cameraLoops', [])
+    if not loops:
+        return []
+    keyframes = loops[min(loop_index, len(loops) - 1)].get('keyframes', [])
+    return [tuple(float(v) for v in kf[0]) for kf in keyframes]
 
 
 def catmull_rom(p0, p1, p2, p3, t):
@@ -69,13 +88,24 @@ def project(points, eye, target, w, h):
 
 
 def main():
-    src, out = sys.argv[1], sys.argv[2]
-    eye = np.array([float(v) for v in sys.argv[3:6]])
-    target = np.array([float(v) for v in sys.argv[6:9]])
+    args = sys.argv[1:]
+    env_id = None
+    loop_idx = 0
+    if '--env' in args:
+        idx = args.index('--env')
+        env_id = args[idx + 1]
+        del args[idx:idx + 2]
+    if '--loop' in args:
+        idx = args.index('--loop')
+        loop_idx = int(args[idx + 1])
+        del args[idx:idx + 2]
+    src, out = args[0], args[1]
+    eye = np.array([float(v) for v in args[2:5]])
+    target = np.array([float(v) for v in args[5:8]])
     im = Image.open(src).convert('RGB')
     w, h = im.size
     d = ImageDraw.Draw(im)
-    pts = control_points()
+    pts = control_points(env_id=env_id, loop_index=loop_idx)
     samples = path_samples(pts)
     proj = project(samples, eye, target, w, h)
     d.line([tuple(p) for p in proj], fill=(255, 40, 40), width=4)
@@ -83,7 +113,6 @@ def main():
     for i, p in enumerate(cp):
         d.ellipse([p[0] - 7, p[1] - 7, p[0] + 7, p[1] + 7], fill=(255, 255, 0))
         d.text((p[0] + 9, p[1] - 6), str(i), fill=(255, 255, 255))
-    # World grid every 10 m on the ground plane for reference.
     for gx in range(-60, 120, 10):
         line = project(np.array([[gx, 0, z] for z in range(-90, 100, 5)], dtype=float), eye, target, w, h)
         d.line([tuple(p) for p in line], fill=(0, 120, 255), width=1)

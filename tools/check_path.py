@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Checks the camera path (camera_path.cpp) against the obstacle map written by the converter.
+"""Checks the camera path in environments/<env>/environment.json against the obstacle map.
 
 Reports the minimum horizontal clearance along the path and writes an annotated map image.
-Usage: tools/check_path.py [out.png]
+Usage: tools/check_path.py [--env <env>] [--loop <index>] [out.png]
 """
 import os
 import sys
@@ -11,19 +11,23 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from path_map import control_points, path_samples  # noqa: E402
+from path_map import control_points, default_env_id, path_samples  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORIGIN = (-62.46, -87.94)
 CELL = 0.25
 
-
 NUM_BANDS = 16
 _band_points = {}
 
 
-def load_bands():
-    img = np.asarray(Image.open(os.path.join(ROOT, 'build_assets', 'obstacles.pgm'))) > 0
+def load_bands(env_id=None):
+    if env_id is None:
+        env_id = default_env_id()
+    pgm_path = os.path.join(ROOT, 'build_assets', env_id, 'obstacles.pgm')
+    if not os.path.exists(pgm_path):
+        pgm_path = os.path.join(ROOT, 'build_assets', 'obstacles.pgm')
+    img = np.asarray(Image.open(pgm_path)) > 0
     return img.reshape(NUM_BANDS, img.shape[0] // NUM_BANDS, img.shape[1])
 
 
@@ -47,11 +51,25 @@ def clearance_3d(bands, p, vertical_margin=1.0):
 
 
 def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'build_assets', 'path_check.png')
-    bands = load_bands()
+    args = sys.argv[1:]
+    env_id = None
+    loop_idx = 0
+    if '--env' in args:
+        idx = args.index('--env')
+        env_id = args[idx + 1]
+        del args[idx:idx + 2]
+    if '--loop' in args:
+        idx = args.index('--loop')
+        loop_idx = int(args[idx + 1])
+        del args[idx:idx + 2]
+    if env_id is None:
+        env_id = default_env_id()
+    out = args[0] if args else os.path.join(ROOT, 'build_assets', env_id, 'path_check.png')
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    bands = load_bands(env_id)
     grid = bands.any(axis=0)
     h, w = grid.shape
-    pts = control_points()
+    pts = control_points(env_id=env_id, loop_index=loop_idx)
     samples = path_samples(pts, per_segment=48)
     worst = []
     for i, s in enumerate(samples):
