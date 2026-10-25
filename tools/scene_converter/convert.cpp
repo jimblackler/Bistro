@@ -145,6 +145,10 @@ struct ConvertConfig {
     bool addCurtainGlass = true;
     bool deduplicateWithinScene = false;
     std::vector<std::string> skipNodeSubstrings;
+    // Thin, light-transmitting materials (leaves, grass, curtains, awnings): a material is flagged
+    // kMaterialTranslucent if its name contains any include substring and no exclude substring.
+    std::vector<std::string> translucentInclude;
+    std::vector<std::string> translucentExclude;
     bool hasSunOverride = false;
     float sunDir[3] = {0.3f, 0.8f, 0.2f};
     float sunColor[3] = {1.0f, 1.0f, 1.0f};
@@ -630,7 +634,7 @@ public:
         std::memcpy(header.sunColor, sunColor_, sizeof(sunColor_));
 
         std::vector<bistro::MaterialRecord> matRecords;
-        size_t maskCount = 0, blendCount = 0, foldedOrm = 0, foldedBase = 0;
+        size_t maskCount = 0, blendCount = 0, foldedOrm = 0, foldedBase = 0, translucentCount = 0;
         for (auto& m : materials_) {
             bistro::MaterialRecord r{};
             r.baseColorTexture = -1;
@@ -672,6 +676,10 @@ public:
             if (m.doubleSided || containsCI(m.name, "DoubleSided") || containsCI(m.name, "TwoSided") ||
                 r.alphaMode != bistro::kAlphaOpaque) {
                 r.flags |= bistro::kMaterialDoubleSided;
+            }
+            if (isTranslucentMaterial(m.name) && r.alphaMode != bistro::kAlphaBlend) {
+                r.flags |= bistro::kMaterialTranslucent;
+                translucentCount++;
             }
             if (r.emissiveTexture >= 0) {
                 r.flags |= bistro::kMaterialEmissive;
@@ -790,9 +798,9 @@ public:
         for (auto& c : clusters) triangles += c.indexCount / 3;
         printf("  folded %zu constant ORM textures and %zu constant BaseColor textures into material factors\n",
                foldedOrm, foldedBase);
-        printf("Wrote %s\n  vertices %zu, triangles %zu, clusters %zu, materials %zu (mask %zu, blend %zu), textures %zu\n",
+        printf("Wrote %s\n  vertices %zu, triangles %zu, clusters %zu, materials %zu (mask %zu, blend %zu, translucent %zu), textures %zu\n",
                path.c_str(), vertices.size(), triangles, clusters.size(), materials_.size(), maskCount, blendCount,
-               textures_.size());
+               translucentCount, textures_.size());
         printf("  bounds (%.2f %.2f %.2f) - (%.2f %.2f %.2f)\n", mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
 
         writeTextureList();
@@ -926,6 +934,18 @@ private:
         }
         for (unsigned c = 0; c < node->mNumChildren; ++c)
             walk(scene, node->mChildren[c], world, materialRemap, isPrimary, skipped, added);
+    }
+
+    bool isTranslucentMaterial(const std::string& name) const {
+        bool included = false;
+        for (const auto& s : cfg_.translucentInclude) {
+            if (containsCI(name, s.c_str())) { included = true; break; }
+        }
+        if (!included) return false;
+        for (const auto& s : cfg_.translucentExclude) {
+            if (containsCI(name, s.c_str())) return false;
+        }
+        return true;
     }
 
     void addMesh(const aiMesh* mesh, const aiMatrix4x4& world, uint32_t material, int score) {
@@ -1285,6 +1305,8 @@ ConvertConfig loadConvertConfig(const std::string& workDir) {
         else if (key == "add_curtain_glass") { int v = 1; in >> v; cfg.addCurtainGlass = v != 0; }
         else if (key == "deduplicate_within_scene") { int v = 0; in >> v; cfg.deduplicateWithinScene = v != 0; }
         else if (key == "skip_node") { std::string s; in >> s; cfg.skipNodeSubstrings.push_back(s); }
+        else if (key == "translucent_material") { std::string s; in >> s; cfg.translucentInclude.push_back(s); }
+        else if (key == "translucent_exclude") { std::string s; in >> s; cfg.translucentExclude.push_back(s); }
         else if (key == "sun_override") {
             cfg.hasSunOverride = true;
             in >> cfg.sunDir[0] >> cfg.sunDir[1] >> cfg.sunDir[2] >> cfg.sunColor[0] >> cfg.sunColor[1] >> cfg.sunColor[2];

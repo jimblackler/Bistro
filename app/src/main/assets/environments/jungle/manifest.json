@@ -24,6 +24,11 @@
   "addCurtainGlass": false,
   "deduplicateWithinScene": false,
   "skipNodeSubstrings": [],
+  "translucentMaterials": [
+    "Leaves",
+    "Grass",
+    "Shrub"
+  ],
   "pointLights": [
     {
       "position": [

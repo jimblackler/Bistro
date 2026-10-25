@@ -1284,6 +1284,7 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
     u.exposureParams2[0] = 1.2f;  // adaptation speed
     u.exposureParams2[1] = 1.0f;  // auto exposure on
     u.exposureParams2[2] = pose.indoor ? 1.0f : 0.0f;
+    u.exposureParams2[3] = rc.translucency;
     u.occlusionParams[0] = static_cast<float>(hizExtent_.width);
     u.occlusionParams[1] = static_cast<float>(hizExtent_.height);
     u.occlusionParams[2] = static_cast<float>(hizMipCount_);

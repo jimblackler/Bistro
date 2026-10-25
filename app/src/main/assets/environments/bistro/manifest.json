@@ -21,6 +21,18 @@
   "aoMinVisibility": 0.0,
   "aoMinOccluderArea": 0.0,
   "skipNodeSubstrings": [],
+  "translucentMaterials": [
+    "Foliage_",
+    "Plants_plants",
+    "Curtain",
+    "Awning",
+    "Cloth"
+  ],
+  "translucentExclude": [
+    "Trunk",
+    "branches",
+    "Beams"
+  ],
   "foldConstantBaseColor": false,
   "addCurtainGlass": true,
   "renderConfig": {
@@ -37,7 +49,8 @@
       0.0,
       0.0,
       0.0
-    ]
+    ],
+    "translucency": 1.0
   },
   "cameraLoops": [
     {

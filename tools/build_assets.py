@@ -233,6 +233,10 @@ def write_convert_config(cfg, work_dir):
         f.write('deduplicate_within_scene %d\n' % (1 if cfg.get('deduplicateWithinScene', False) else 0))
         for sub in cfg.get('skipNodeSubstrings', []):
             f.write('skip_node %s\n' % sub)
+        for sub in cfg.get('translucentMaterials', []):
+            f.write('translucent_material %s\n' % sub)
+        for sub in cfg.get('translucentExclude', []):
+            f.write('translucent_exclude %s\n' % sub)
         sun_ov = cfg.get('sunOverride')
         if sun_ov:
             d = sun_ov['direction']

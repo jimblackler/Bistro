@@ -137,6 +137,7 @@ bool Scene::loadManifest() {
         renderConfig.sunAzimuthOffset = parseJsonFloat(sub, "sunAzimuthOffset", renderConfig.sunAzimuthOffset);
         renderConfig.sunIntensityScale = parseJsonFloat(sub, "sunIntensityScale", renderConfig.sunIntensityScale);
         renderConfig.pointLightScale = parseJsonFloat(sub, "pointLightScale", renderConfig.pointLightScale);
+        renderConfig.translucency = parseJsonFloat(sub, "translucency", renderConfig.translucency);
     }
     return true;
 }

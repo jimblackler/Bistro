@@ -127,6 +127,16 @@ void main() {
     vec3 diffuseColor = base.rgb * (1.0 - metallic);
     vec3 f0 = mix(vec3(0.04), base.rgb, metallic);
 
+    // --- Thin-surface translucency setup (leaves, grass, curtains, awnings) ---
+    // Light passing through a thin leaf or fabric is filtered by the material on the way in and out, so
+    // the transmitted colour is a more saturated version of the albedo.
+    float translucency = (m.flags & 8u) != 0u ? frame.exposureParams2.w : 0.0;
+    vec3 transTint = vec3(0.0);
+    if (translucency > 0.0) {
+        float maxC = max(diffuseColor.r, max(diffuseColor.g, diffuseColor.b));
+        transTint = diffuseColor * mix(vec3(1.0), diffuseColor / max(maxC, 1e-3), 0.6) * (translucency / PI);
+    }
+
     // --- Sun (directional light with static shadow map) ---
     vec3 L = frame.sunDirection.xyz;
     float NdotL = clamp(dot(N, L), 0.0, 1.0);
@@ -145,6 +155,19 @@ void main() {
         color += (diff + spec) * sunRadiance;
         specDirect += spec * sunRadiance;
     }
+    if (translucency > 0.0 && geomNdotL < 0.05) {
+        // Back-lit side: wrapped transmission plus a forward-scattering lobe that makes leaves and
+        // curtains glow when the camera looks towards the sun through them. The shadow lookup is
+        // taken from the sun-facing side so leaves deep inside a canopy stay dark.
+        float backNdotL = clamp((0.25 - dot(N, L)) * 0.8, 0.0, 1.0);
+        if (backNdotL > 0.0) {
+            float shadowT = sampleShadow(inWorldPos, -geomN, clamp(-geomNdotL, 0.0, 1.0));
+            float VdotL = clamp(-dot(V, L), 0.0, 1.0);
+            float VdotL2 = VdotL * VdotL;
+            float forward = VdotL2 * VdotL2 * VdotL2;
+            color += transTint * frame.sunColor.rgb * ((0.35 + 2.5 * forward) * backNdotL * shadowT);
+        }
+    }
 
     // --- Point lights (interior lamps) ---
     for (uint i = 0u; i < frame.lightCount.x; ++i) {
@@ -154,10 +177,17 @@ void main() {
         float range = pl.positionRadius.w;
         if (d2 > range * range) continue;
         vec3 Lp = toLight * inversesqrt(d2);
-        float nl = clamp(dot(N, Lp), 0.0, 1.0);
-        if (nl <= 0.0) continue;
+        float nlRaw = dot(N, Lp);
         float falloff = clamp(1.0 - pow(d2 / (range * range), 2.0), 0.0, 1.0);
         falloff = falloff * falloff / max(d2, 0.01);
+        if (translucency > 0.0 && nlRaw < 0.25) {
+            float bt = clamp((0.25 - nlRaw) * 0.8, 0.0, 1.0);
+            float vl = clamp(-dot(V, Lp), 0.0, 1.0);
+            float vl2 = vl * vl;
+            color += transTint * pl.color.rgb * (falloff * bt * (0.35 + 2.5 * vl2 * vl2 * vl2));
+        }
+        float nl = clamp(nlRaw, 0.0, 1.0);
+        if (nl <= 0.0) continue;
         vec3 H = normalize(V + Lp);
         vec3 F = F_Schlick(f0, clamp(dot(V, H), 0.0, 1.0));
         vec3 spec = D_GGX(clamp(dot(N, H), 0.0, 1.0), a) * V_SmithGGXCorrelated(NdotV, nl, a) * F;
@@ -173,6 +203,11 @@ void main() {
     // Light bounced off the sunlit surroundings keeps occluded areas from going completely black.
     vec3 bounce = frame.sunColor.rgb * 0.035 * (0.6 + 0.4 * skyVis);
     color += diffuseColor * (irradiance * diffuseOcclusion + bounce * ao) * (1.0 / PI);
+    if (translucency > 0.0) {
+        // Skylight diffusing through from the far side of the leaf / fabric.
+        vec3 backIrradiance = shIrradiance(worldToEnv(-N)) * frame.envRotation.w;
+        color += transTint * backIrradiance * (0.35 * diffuseOcclusion);
+    }
 
     bool isOpaqueGlass = (ALPHA_MODE == 0u) && ((m.flags & 4u) == 0u) &&
                          (m.roughnessFactor > 0.07 && m.roughnessFactor < 0.09) &&

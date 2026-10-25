@@ -36,6 +36,8 @@ enum AlphaMode : uint32_t {
 enum MaterialFlags : uint32_t {
     kMaterialDoubleSided = 1u << 0,
     kMaterialEmissive = 1u << 1,
+    // bit 2 is reserved: set at load time when the material has an ORM texture.
+    kMaterialTranslucent = 1u << 3,  // thin leaf / fabric: transmits back-lit sunlight
 };
 
 struct SceneHeader {

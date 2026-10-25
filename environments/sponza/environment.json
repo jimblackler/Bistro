@@ -29,6 +29,7 @@
     "decals_",
     "master_material"
   ],
+  "translucentMaterials": ["curtain", "Leaf", "SmallBranches"],
   "pointLights": [
     {"position": [-8.43, 3.55, 4.53], "range": 7.5, "color": [14.0, 8.5, 4.2]},
     {"position": [-4.87, 3.55, 4.54], "range": 7.5, "color": [14.0, 8.5, 4.2]},

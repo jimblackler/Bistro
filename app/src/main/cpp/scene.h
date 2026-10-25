@@ -56,6 +56,7 @@ struct RenderConfig {
     float sunAzimuthOffset = -0.35f;
     float sunIntensityScale = 2.2f;
     float pointLightScale = 0.030f;
+    float translucency = 1.0f;  // strength of back-lit transmission through kMaterialTranslucent materials
 };
 
 constexpr uint32_t kBucketOpaque = 0;

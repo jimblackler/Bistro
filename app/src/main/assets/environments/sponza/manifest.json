@@ -29,6 +29,11 @@
     "decals_",
     "master_material"
   ],
+  "translucentMaterials": [
+    "curtain",
+    "Leaf",
+    "SmallBranches"
+  ],
   "pointLights": [
     {
       "position": [
