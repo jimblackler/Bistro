@@ -58,8 +58,9 @@ float sampleShadow(vec3 worldPos, vec3 geomNormal, float NdotL) {
     const vec2 poisson[8] = vec2[](
         vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
         vec2(0.962, -0.195), vec2(0.473, -0.480), vec2(0.519, 0.767), vec2(0.185, -0.893));
-    // Interleaved gradient noise, varied per frame so TAA accumulates different rotations.
-    float angle = fract(52.9829189 * fract(dot(gl_FragCoord.xy + frame.cameraPos.w * 37.0, vec2(0.06711056, 0.00583715)))) * 6.2831853;
+    // Interleaved gradient noise, varied per frame on jittered geometry so TAA accumulates different rotations.
+    float timeSeed = ALPHA_MODE == 1u ? 0.0 : frame.cameraPos.w * 37.0;
+    float angle = fract(52.9829189 * fract(dot(gl_FragCoord.xy + timeSeed, vec2(0.06711056, 0.00583715)))) * 6.2831853;
     float ca = cos(angle), sa = sin(angle);
     mat2 rot = mat2(ca, sa, -sa, ca);
     float sum = 0.0;
@@ -71,17 +72,32 @@ float sampleShadow(vec3 worldPos, vec3 geomNormal, float NdotL) {
 }
 
 vec3 sampleEnvSpecular(vec3 R, float roughness) {
-    vec2 uv = equirectUV(worldToEnv(R));
-    vec3 prefiltered = textureLod(envSpecular, uv, roughness * 5.0).rgb;
-    if (roughness < 0.25) {
-        // Sample the full-resolution 2048x1024 HDR sky mip chain for mirror-smooth glass and chrome.
-        vec3 sharp = textureLod(skyTexture, uv, roughness * 6.0).rgb;
-        return mix(sharp, prefiltered, smoothstep(0.03, 0.25, roughness));
-    }
-    return prefiltered;
+    float lod = roughness * 5.0;
+    return textureLod(envSpecular, equirectUV(worldToEnv(R)), lod).rgb;
+}
+
+// Screen-space ambient occlusion computed from the previous frame's depth (ao.comp), reprojected to this
+// fragment. The stored view depth rejects samples from a different surface (disocclusions, edges), which
+// then fall back to unoccluded.
+float sampleSSAO(vec3 worldPos) {
+    if (frame.aoParams.x < 0.5) return 1.0;
+    vec4 pc = frame.prevViewProj * vec4(worldPos, 1.0);
+    if (pc.w <= 0.0) return 1.0;
+    vec2 uv = pc.xy / pc.w * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 1.0;
+    vec2 a = textureLod(aoTexture, uv, 0.0).rg;
+    float rel = abs(a.g - pc.w) / pc.w;
+    return mix(a.r, 1.0, smoothstep(0.03, 0.08, rel));
 }
 
 void main() {
+    // Compute all screen-space derivatives in uniform control flow before any discard or dynamic branch.
+    vec2 dUVdx = dFdx(inUV);
+    vec2 dUVdy = dFdy(inUV);
+    float skyVisGrad = fwidth(inSkyVisibility);
+    vec3 dGeomNdx = dFdx(inNormal);
+    vec3 dGeomNdy = dFdy(inNormal);
+
     Material m = materials[inMaterial];
     vec4 base = texture(textures[nonuniformEXT(m.baseColorTexture)], inUV) * m.baseColorFactor;
 
@@ -95,37 +111,75 @@ void main() {
         }
     }
 
-    // Reconstruct the world position from the (jittered) depth.
+    // Reconstruct the world position from the depth (accounting for unjittered ALPHA_MODE == 1u).
     vec2 ndcXY = gl_FragCoord.xy / frame.renderParams.zw * 2.0 - 1.0;
+    if (ALPHA_MODE == 1u) ndcXY += frame.taaParams.xy;
     vec4 wp = frame.invViewProj * vec4(ndcXY, gl_FragCoord.z, 1.0);
     vec3 inWorldPos = wp.xyz / wp.w;
 
     vec3 geomN = normalize(inNormal);
     if (!gl_FrontFacing) geomN = -geomN;
-    vec3 T = normalize(inTangent.xyz - geomN * dot(geomN, inTangent.xyz));
+    vec3 Traw = inTangent.xyz - geomN * dot(geomN, inTangent.xyz);
+    vec3 T = Traw * inversesqrt(max(dot(Traw, Traw), 1e-8));
     vec3 B = cross(geomN, T) * inTangent.w;
 
     vec4 nt = texture(textures[nonuniformEXT(m.normalTexture)], inUV);
     vec2 nxy = vec2(nt.r, nt.a) * 2.0 - 1.0;
-    if (ALPHA_MODE == 2u) {
-        // Subtle low-frequency pane warp so reflections shimmer naturally across flat French window glass.
-        nxy += vec2(sin(inWorldPos.x * 2.7 + inWorldPos.z * 2.3),
-                    cos(inWorldPos.y * 3.1 - inWorldPos.x * 1.9 + inWorldPos.z * 1.7)) * 0.018;
+    float uvFootprint = sqrt(max(dot(dUVdx, dUVdx) + dot(dUVdy, dUVdy), 0.0));
+    if (ALPHA_MODE == 1u) {
+        // Fade high-frequency normal perturbation on distant alpha-tested leaves to prevent sub-pixel shimmer.
+        nxy *= 1.0 - smoothstep(0.015, 0.08, uvFootprint) * 0.75;
     }
     float nz = sqrt(clamp(1.0 - dot(nxy, nxy), 0.0, 1.0));
     vec3 N = normalize(T * nxy.x + B * nxy.y + geomN * nz);
 
+    float louverOcc = 1.0;
+    float louverNormalVar = 0.0;
+    if ((m.flags & 16u) != 0u) {
+        float phi = inUV.x;
+        float stepMeters = abs(inUV.y);
+        bool highContrast = inUV.y > 0.0;
+        float freq = sqrt(max(dUVdx.x * dUVdx.x + dUVdy.x * dUVdy.x, 0.0));
+        float stepScale = smoothstep(0.002, 0.006, stepMeters);
+        float fClamped = min(freq, 0.5);
+        float sinc = fClamped > 1e-4 ? sin(fClamped * PI) / (fClamped * PI) : 1.0;
+        float bandLimit = sinc * smoothstep(0.32, 0.08, freq) * stepScale;
+        float wave = cos(phi * (2.0 * PI));
+        float grooveMin = highContrast ? 0.08 : 0.45;
+        float meanOcc = 0.5 * (grooveMin + 1.0);
+        louverOcc = mix(meanOcc, mix(grooveMin, 1.0, 0.5 + 0.5 * wave), bandLimit);
+        float tiltAmp = (highContrast ? 0.16 : 0.08) * bandLimit;
+        N = normalize(N + T * (sin(phi * (2.0 * PI)) * tiltAmp));
+        louverNormalVar = (1.0 - bandLimit) * (highContrast ? 0.04 : 0.015);
+    }
+
     // The Bistro's "Specular" maps pack roughness (G) and metalness (B); R is unused (always 0).
     vec3 orm = (m.flags & 4u) != 0u ? texture(textures[nonuniformEXT(m.ormTexture)], inUV).rgb : vec3(1.0);
-    float ao = 1.0;
+    float ao = ALPHA_MODE == 2u ? 1.0 : sampleSSAO(inWorldPos);
+    if (ALPHA_MODE == 1u) {
+        // Half-res depth-reconstructed SSAO fluctuates across porous alpha-cutout leaves; rely primarily on baked skyVis.
+        ao = mix(ao, 1.0, 0.65);
+    }
+    float skyVis = mix(inSkyVisibility, 1.0, smoothstep(0.25, 0.85, skyVisGrad));
+    float diffuseOcclusion = ao * skyVis;
+    float directLightOcclusion = mix(1.0, diffuseOcclusion, 0.65);
     float roughness = clamp(orm.g * m.roughnessFactor, 0.04, 1.0);
+    if (ALPHA_MODE == 1u) {
+        roughness = max(roughness, mix(0.04, 0.55, smoothstep(0.015, 0.08, uvFootprint)));
+    }
     float metallic = clamp(orm.b * m.metallicFactor, 0.0, 1.0);
-    float a = roughness * roughness;
+    // Geometric and normal-map specular anti-aliasing (Kaplanyan 2016): broaden GGX roughness by the
+    // screen-space normal variance so sub-pixel grilles, bevels, and normal grooves don't alias.
+    float normalVar = min(dot(dGeomNdx, dGeomNdx) + dot(dGeomNdy, dGeomNdy) +
+                          dot(nxy, nxy) * min(uvFootprint * 8.0, 0.25) + louverNormalVar, 0.25);
+    float aOrig = roughness * roughness;
+    float a = clamp(sqrt(aOrig * aOrig + normalVar * 0.5), 0.0016, 1.0);
+    roughness = sqrt(a);
 
     vec3 V = normalize(frame.cameraPos.xyz - inWorldPos);
     float NdotV = clamp(dot(N, V), 1e-4, 1.0);
-    vec3 diffuseColor = base.rgb * (1.0 - metallic);
-    vec3 f0 = mix(vec3(0.04), base.rgb, metallic);
+    vec3 diffuseColor = base.rgb * (1.0 - metallic) * louverOcc;
+    vec3 f0 = mix(vec3(0.04), base.rgb, metallic) * mix(0.20, 1.0, louverOcc);
 
     // --- Thin-surface translucency setup (leaves, grass, curtains, awnings) ---
     // Light passing through a thin leaf or fabric is filtered by the material on the way in and out, so
@@ -133,8 +187,8 @@ void main() {
     float translucency = (m.flags & 8u) != 0u ? frame.exposureParams2.w : 0.0;
     vec3 transTint = vec3(0.0);
     if (translucency > 0.0) {
-        float maxC = max(diffuseColor.r, max(diffuseColor.g, diffuseColor.b));
-        transTint = diffuseColor * mix(vec3(1.0), diffuseColor / max(maxC, 1e-3), 0.6) * (translucency / PI);
+        float maxC = max(diffuseColor.r, max(diffuseColor.g, max(diffuseColor.b, 1e-3)));
+        transTint = diffuseColor * mix(vec3(1.0), diffuseColor / maxC, 0.6) * (translucency / PI);
     }
 
     // --- Sun (directional light with static shadow map) ---
@@ -191,14 +245,12 @@ void main() {
         vec3 H = normalize(V + Lp);
         vec3 F = F_Schlick(f0, clamp(dot(V, H), 0.0, 1.0));
         vec3 spec = D_GGX(clamp(dot(N, H), 0.0, 1.0), a) * V_SmithGGXCorrelated(NdotV, nl, a) * F;
-        vec3 lightRadiance = pl.color.rgb * nl * falloff;
+        vec3 lightRadiance = pl.color.rgb * nl * falloff * directLightOcclusion;
         color += (diffuseColor * (1.0 / PI) * (1.0 - F) + spec) * lightRadiance;
         specDirect += spec * lightRadiance;
     }
 
-    // --- Image based ambient lighting, occluded by baked sky visibility and material AO ---
-    float skyVis = inSkyVisibility;
-    float diffuseOcclusion = ao * skyVis;
+    // --- Image based ambient lighting, occluded by baked sky visibility and screen-space AO ---
     vec3 irradiance = shIrradiance(worldToEnv(N)) * frame.envRotation.w;
     // Light bounced off the sunlit surroundings keeps occluded areas from going completely black.
     vec3 bounce = frame.sunColor.rgb * 0.035 * (0.6 + 0.4 * skyVis);
@@ -209,31 +261,19 @@ void main() {
         color += transTint * backIrradiance * (0.35 * diffuseOcclusion);
     }
 
-    bool isOpaqueGlass = (ALPHA_MODE == 0u) && ((m.flags & 4u) == 0u) &&
-                         (m.roughnessFactor > 0.07 && m.roughnessFactor < 0.09) &&
-                         (m.metallicFactor < 0.01) &&
-                         (m.baseColorFactor.r > 0.20 && m.baseColorFactor.r < 0.25);
-    bool isGlassSurface = (ALPHA_MODE == 2u) || isOpaqueGlass;
-
     vec3 R = reflect(-V, N);
     float specOcclusion = clamp(pow(NdotV + diffuseOcclusion, exp2(-16.0 * roughness - 1.0)) - 1.0 + diffuseOcclusion,
                                 0.0, 1.0);
-    if (isGlassSurface && roughness < 0.15 && metallic < 0.1) {
-        // Keep glossy dielectric glass (frosted doors/transoms) reflective even when recessed in door frames.
-        specOcclusion = max(specOcclusion, 0.75);
+    if (ALPHA_MODE == 2u) {
+        bool cameraIndoors = frame.exposureParams2.z > 0.5;
+        specOcclusion = cameraIndoors ? min(specOcclusion, 0.12) : clamp(max(specOcclusion, 0.25), 0.0, 0.55);
     }
-    vec3 Rglass = normalize(vec3(R.x, clamp(R.y * 0.65 + 0.26, 0.05, 0.90), R.z));
     vec3 envSpec = sampleEnvSpecular(R, roughness) * frame.envRotation.w;
-    vec3 canyonSpec = envSpec;
-    if (isGlassSurface && roughness < 0.15 && metallic < 0.1) {
-        canyonSpec = sampleEnvSpecular(Rglass, roughness) * frame.envRotation.w;
-        envSpec = mix(envSpec, canyonSpec, 0.85);
-    }
     color += envSpec * envBRDFApprox(f0, roughness, NdotV) * specOcclusion;
 
     // --- Emissive ---
     if ((m.flags & 2u) != 0u) {
-        vec3 e = texture(textures[nonuniformEXT(m.emissiveTexture)], inUV).rgb;
+        vec3 e = texture(textures[nonuniformEXT(m.emissiveTexture)], inUV, 0.5).rgb;
         color += e * m.emissiveFactor * frame.postParams.w;
     }
 
@@ -242,50 +282,26 @@ void main() {
     float heightTerm = exp(-max(inWorldPos.y - frame.fogParams.z, 0.0) * frame.fogParams.y);
     float fog = min(1.0 - exp(-dist * frame.fogParams.x * heightTerm), frame.fogParams.w);
 
-    if (isGlassSurface) {
-        // Glass: premultiplied alpha. Separate curved 3D glassware/bottles (where geometric normals vary
-        // across triangles) from flat architectural window panes so each gets tailored reflection tuning.
-        bool isGlassware = !isOpaqueGlass &&
-                           ((m.baseColorFactor.a > 0.35 && m.baseColorFactor.a < 0.50) ||
-                            (length(fwidth(geomN)) > 0.012));
-        float alpha = isOpaqueGlass
-            ? 1.0
-            : (isGlassware ? clamp(base.a, 0.08, 0.14) : max(clamp(base.a, 0.0, 1.0), 0.14));
-        bool cameraIndoors = frame.exposureParams2.z > 0.5;
-
-        float cLum = max(luminance(canyonSpec), 1e-4);
-        float pLum = pow(cLum, 0.45);
-        float compressedLum = 1.65 * pLum / (1.0 + 0.35 * pLum);
-        vec3 glassEnv = canyonSpec * (compressedLum / cLum);
-        glassEnv = mix(glassEnv, vec3(compressedLum) * vec3(0.93, 0.97, 1.05), 0.30);
-
-        // Boost mid-angle Fresnel on flat window panes so street-side shopfronts clearly reflect
-        // opposite buildings while remaining transparent when viewed straight-on.
-        float fresnelCurve = isGlassware ? pow(1.0 - NdotV, 2.4) : pow(1.0 - NdotV, 1.65);
-        vec3 F_glass = mix(vec3(0.08), vec3(isGlassware ? 0.85 : 0.78), fresnelCurve);
-
-        if (cameraIndoors || (isGlassware && skyVis < 0.15)) {
-            // Inside the restaurant, flat windows looking out reflect the dim indoor room subtly while
-            // curved wine glasses, tumblers, jars, and bottles keep crisp crystal rim reflections.
-            float indoorScale = isGlassware ? 0.55 : 0.07;
-            glassEnv *= indoorScale * vec3(1.0, 0.90, 0.76);
-        }
-        if (!gl_FrontFacing && !isOpaqueGlass) {
-            // Attenuate the inner walls of hollow glassware/bottles and indoor double-pane windows,
-            // while keeping single-pane exterior windows bright regardless of FBX winding.
-            float backScale = isGlassware ? 0.30 : (cameraIndoors ? 0.50 : 0.85);
-            F_glass *= backScale;
-            specDirect *= backScale;
-        }
+    if (ALPHA_MODE == 2u) {
+        // Glass: premultiplied alpha. Physical dielectric Fresnel reflections are added on top of
+        // the transmitted background without skybox over-brightening or normal warping.
+        float alpha = clamp(base.a, 0.0, 1.0);
+        vec3 F_env = envBRDFApprox(vec3(0.04), roughness, NdotV);
+        vec3 envRefl = envSpec * F_env * specOcclusion;
         vec3 clampedSpecDirect = specDirect / (1.0 + luminance(specDirect) * 0.25);
-        vec3 reflection = glassEnv * F_glass + clampedSpecDirect;
+        if (!gl_FrontFacing) {
+            envRefl *= 0.35;
+            clampedSpecDirect *= 0.35;
+        }
+        vec3 reflection = envRefl + clampedSpecDirect * 0.45;
         vec3 diffOnly = max(color - specDirect - envSpec * envBRDFApprox(f0, roughness, NdotV) * specOcclusion, vec3(0.0));
-        vec3 body = diffOnly * alpha * (1.0 - F_glass) + reflection;
+        vec3 body = diffOnly * alpha + reflection;
         body = mix(body, frame.fogColor.rgb * alpha, fog);
-        float fresnelAlpha = isOpaqueGlass ? 1.0 : clamp(alpha + luminance(F_glass) * 0.65, 0.0, 1.0);
+        float fresnelAlpha = clamp(alpha + luminance(F_env), 0.0, 1.0);
         outColor = vec4(body, fresnelAlpha);
     } else {
         color = mix(color, frame.fogColor.rgb, fog);
+        if (frame.aoParams.w > 0.5) color = vec3(ao * 0.5);  // `debug.bistro.aodebug`: screen-space AO only
         outColor = vec4(color, ALPHA_MODE == 1u ? base.a : 1.0);
     }
 }

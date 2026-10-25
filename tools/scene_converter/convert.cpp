@@ -72,6 +72,7 @@ struct MaterialInfo {
     bool hasRoughnessFactor = false;
     bool hasMetallicFactor = false;
     bool doubleSided = false;
+    bool isLouver = false;
 };
 
 // All geometry belonging to one material, in world space.
@@ -215,99 +216,6 @@ public:
         return true;
     }
 
-    void addCurtainWindowGlass() {
-        if (!cfg_.addCurtainGlass) return;
-        auto itCurtain = materialByName_.find("MASTER_Curtains");
-        auto itGlass = materialByName_.find("MASTER_Glass_Exterior");
-        if (itCurtain == materialByName_.end() || itGlass == materialByName_.end()) return;
-        uint32_t curtainMat = itCurtain->second;
-        uint32_t glassMat = itGlass->second;
-
-        // Collect existing exterior glass triangle centroids so we don't double-up panes on Paris_Building_01.
-        std::vector<Vec3> existingGlass;
-        for (size_t m = 0; m < materials_.size(); ++m) {
-            if (classifyAlpha(materials_[m]) != bistro::kAlphaBlend) continue;
-            const MaterialGeometry& g = geometry_[m];
-            for (size_t t = 0; t + 2 < g.indices.size(); t += 3) {
-                Vec3 c = (g.vertices[g.indices[t]].pos + g.vertices[g.indices[t + 1]].pos +
-                          g.vertices[g.indices[t + 2]].pos) *
-                         (1.0f / 3.0f);
-                existingGlass.push_back(c);
-            }
-        }
-
-        const MaterialGeometry& src = geometry_[curtainMat];
-        MaterialGeometry& dst = geometry_[glassMat];
-        size_t addedTris = 0;
-        for (size_t t = 0; t + 2 < src.indices.size(); t += 3) {
-            const FullVertex& v0 = src.vertices[src.indices[t]];
-            const FullVertex& v1 = src.vertices[src.indices[t + 1]];
-            const FullVertex& v2 = src.vertices[src.indices[t + 2]];
-            Vec3 c = (v0.pos + v1.pos + v2.pos) * (1.0f / 3.0f);
-            bool hasPane = false;
-            for (const Vec3& eg : existingGlass) {
-                Vec3 d = c - eg;
-                if (dot(d, d) < 0.35f * 0.35f) {
-                    hasPane = true;
-                    break;
-                }
-            }
-            if (hasPane) continue;
-            uint32_t base = static_cast<uint32_t>(dst.vertices.size());
-            dst.vertices.push_back(v0);
-            dst.vertices.push_back(v1);
-            dst.vertices.push_back(v2);
-            dst.indices.push_back(base);
-            dst.indices.push_back(base + 1);
-            dst.indices.push_back(base + 2);
-            addedTris++;
-        }
-
-        // Also add exterior glass panes across the 6 ground-floor shopfront display windows
-        // (Boulangerie, Tie Shop, and Librairie) that were left unglazed in BistroExterior.fbx.
-        struct StorefrontPane {
-            float x0, z0, x1, z1, y0, y1;
-            float nx, nz;
-        };
-        const StorefrontPane kStorefrontPanes[] = {
-            // Boulangerie right & left display windows
-            {4.50f, -17.54f, 6.83f, -20.42f, 1.99f, 4.40f, -0.78f, -0.62f},
-            {10.30f, -24.73f, 12.63f, -27.61f, 1.99f, 4.40f, -0.78f, -0.62f},
-            // Librairie right & left display windows
-            {16.03f, -32.73f, 17.53f, -34.24f, 1.24f, 4.45f, -0.71f, -0.70f},
-            {18.52f, -35.88f, 20.16f, -38.41f, 1.24f, 4.45f, -0.84f, -0.54f},
-            // Tie Shop right & left display windows
-            {4.52f, -42.48f, 6.48f, -44.82f, 1.52f, 3.70f, 0.77f, 0.64f},
-            {7.35f, -45.65f, 11.80f, -51.40f, 1.52f, 3.70f, 0.79f, 0.61f},
-        };
-        for (const auto& sp : kStorefrontPanes) {
-            Vec3 n = normalize({sp.nx, 0.0f, sp.nz});
-            Vec3 t = normalize({-n.z, 0.0f, n.x});
-            FullVertex q[4]{};
-            q[0].pos = {sp.x0, sp.y0, sp.z0};
-            q[1].pos = {sp.x1, sp.y0, sp.z1};
-            q[2].pos = {sp.x1, sp.y1, sp.z1};
-            q[3].pos = {sp.x0, sp.y1, sp.z0};
-            for (int i = 0; i < 4; ++i) {
-                q[i].normal = n;
-                q[i].tangent = t;
-                q[i].tangentSign = 1.0f;
-                q[i].uv[0] = (i == 1 || i == 2) ? 1.0f : 0.0f;
-                q[i].uv[1] = (i >= 2) ? 1.0f : 0.0f;
-            }
-            uint32_t base = static_cast<uint32_t>(dst.vertices.size());
-            for (int i = 0; i < 4; ++i) dst.vertices.push_back(q[i]);
-            dst.indices.push_back(base + 0);
-            dst.indices.push_back(base + 1);
-            dst.indices.push_back(base + 2);
-            dst.indices.push_back(base + 0);
-            dst.indices.push_back(base + 2);
-            dst.indices.push_back(base + 3);
-            addedTris += 2;
-        }
-        printf("  added %zu window glass triangles over MASTER_Curtains and storefronts\n", addedTris);
-    }
-
     void prepareGeometry() {
         if (cfg_.deduplicateWithinScene) {
             deduplicateTrianglesAndOffsetDecals();
@@ -327,7 +235,6 @@ public:
                 geo.vertices = std::move(compactVerts);
             }
         }
-        addCurtainWindowGlass();
     }
 
     void deduplicateTrianglesAndOffsetDecals() {
@@ -681,6 +588,9 @@ public:
                 r.flags |= bistro::kMaterialTranslucent;
                 translucentCount++;
             }
+            if (m.isLouver) {
+                r.flags |= bistro::kMaterialLouver;
+            }
             if (r.emissiveTexture >= 0) {
                 r.flags |= bistro::kMaterialEmissive;
                 r.emissiveFactor[0] = r.emissiveFactor[1] = r.emissiveFactor[2] = 1.0f;
@@ -699,9 +609,13 @@ public:
             }
             if (r.alphaMode == bistro::kAlphaBlend) {
                 r.baseColorTexture = textureIndex(m.baseColor, bistro::kTextureBaseColor);
-                // Ensure all glass surfaces (windows, bottles, glassware, display cases) are mirror-smooth
-                // rather than inheriting the 0.737 placeholder roughness from constant 16x16 Specular maps.
-                r.roughnessFactor = containsCI(m.name, "Dirty") ? 0.08f : 0.04f;
+                if (containsCI(m.name, "Spotlight")) {
+                    r.roughnessFactor = 0.35f;
+                } else if (containsCI(m.name, "Dirty")) {
+                    r.roughnessFactor = 0.22f;
+                } else {
+                    r.roughnessFactor = 0.12f;
+                }
                 r.metallicFactor = 0.0f;
                 // The Bistro glass was authored for path tracing (specular transmission) and its base colour
                 // textures are fully opaque. Give it a raster-friendly opacity so windows are see-through.
@@ -712,17 +626,18 @@ public:
                     float alpha = 0.14f;
                     if (containsCI(m.name, "Dirty")) alpha = 0.24f;
                     else if (containsCI(m.name, "Emissive")) alpha = 0.6f;
-                    else if (containsCI(m.name, "Bottle") || containsCI(m.name, "Wine")) alpha = 0.42f;
+                    else if (containsCI(m.name, "Bottle") || containsCI(m.name, "Wine")) alpha = 0.38f;
                     r.baseColorFactor[3] = alpha;
                 }
             } else if (containsCI(m.name, "Frosted") || containsCI(m.name, "Frozen")) {
                 r.baseColorTexture = textureIndex(m.baseColor, bistro::kTextureBaseColor);
-                // Opaque frosted glass on unbacked exterior doors/transoms: dark tinted glossy glass.
-                r.roughnessFactor = 0.08f;
+                // Opaque frosted glass on unbacked exterior doors/transoms: diffuse frosted roughness so
+                // the pebbled normal map scatters light softly instead of acting like a warped mirror.
+                r.roughnessFactor = 0.65f;
                 r.metallicFactor = 0.0f;
-                r.baseColorFactor[0] = 0.22f;
-                r.baseColorFactor[1] = 0.25f;
-                r.baseColorFactor[2] = 0.27f;
+                r.baseColorFactor[0] = 0.28f;
+                r.baseColorFactor[1] = 0.31f;
+                r.baseColorFactor[2] = 0.33f;
             } else if (r.alphaMode == bistro::kAlphaOpaque && !(r.flags & bistro::kMaterialEmissive)) {
                 auto st = stats_.all.find(m.baseColor);
                 if (st != stats_.all.end() && st->second.maxStdDev < 0.01f &&
@@ -867,8 +782,106 @@ private:
         return index;
     }
 
+    struct LouverContext {
+        bool active = false;
+        Vec3 dir{0, 1, 0};
+        float step = 0.01f;
+        float ratio = 1.0f;
+        float originProj = 0.0f;
+        float effBevelT = 1.0f;
+        size_t expectedChildTris = 0;
+    };
+
+    uint32_t registerLouverMaterial(uint32_t baseMat, bool highContrastGrille) {
+        std::string suffix = highContrastGrille ? "__louver_hi" : "__louver_lo";
+        std::string key = materials_[baseMat].name + suffix;
+        auto it = materialByName_.find(key);
+        if (it != materialByName_.end()) return it->second;
+
+        MaterialInfo info = materials_[baseMat];
+        info.name = key;
+        info.isLouver = true;
+        bool brightMetal = containsCI(info.name, "Alluminio") || containsCI(info.name, "OctGlossy21");
+        info.baseColor.clear();
+        info.normal.clear();
+        info.orm.clear();
+        info.emissive.clear();
+        float c = brightMetal ? 0.62f : (highContrastGrille ? 0.44f : 0.16f);
+        info.baseColorFactor[0] = c;
+        info.baseColorFactor[1] = c * 1.02f;
+        info.baseColorFactor[2] = c * 1.05f;
+        info.baseColorFactor[3] = 1.0f;
+        info.roughnessFactor = highContrastGrille ? 0.40f : 0.48f;
+        info.metallicFactor = 0.30f;
+        info.hasRoughnessFactor = true;
+        info.hasMetallicFactor = true;
+
+        uint32_t index = static_cast<uint32_t>(materials_.size());
+        materials_.push_back(info);
+        geometry_.emplace_back();
+        materialByName_[key] = index;
+        return index;
+    }
+
+    static void collectSubtreeTris(const aiScene* scene, const aiNode* n, const aiMatrix4x4& parentWorld,
+                                   std::vector<Vec3>& pos, std::vector<Vec3>& norm,
+                                   std::vector<Vec3>& triA, std::vector<Vec3>& triB, std::vector<Vec3>& triC) {
+        aiMatrix4x4 w = parentWorld * n->mTransformation;
+        aiMatrix3x3 nm = aiMatrix3x3(w);
+        nm.Inverse().Transpose();
+        for (unsigned mi = 0; mi < n->mNumMeshes; ++mi) {
+            const aiMesh* m = scene->mMeshes[n->mMeshes[mi]];
+            for (unsigned v = 0; v < m->mNumVertices; ++v) {
+                aiVector3D p = w * m->mVertices[v];
+                aiVector3D nr = m->HasNormals() ? (nm * m->mNormals[v]) : aiVector3D(0, 1, 0);
+                pos.push_back({p.x, p.y, p.z});
+                norm.push_back(normalize({nr.x, nr.y, nr.z}));
+            }
+            for (unsigned f = 0; f < m->mNumFaces; ++f) {
+                if (m->mFaces[f].mNumIndices == 3) {
+                    aiVector3D a = w * m->mVertices[m->mFaces[f].mIndices[0]];
+                    aiVector3D b = w * m->mVertices[m->mFaces[f].mIndices[1]];
+                    aiVector3D c = w * m->mVertices[m->mFaces[f].mIndices[2]];
+                    triA.push_back({a.x, a.y, a.z});
+                    triB.push_back({b.x, b.y, b.z});
+                    triC.push_back({c.x, c.y, c.z});
+                }
+            }
+        }
+        for (unsigned c = 0; c < n->mNumChildren; ++c) {
+            collectSubtreeTris(scene, n->mChildren[c], w, pos, norm, triA, triB, triC);
+        }
+    }
+
+    static Vec3 aabbCenter(const std::vector<Vec3>& pts) {
+        Vec3 mn{FLT_MAX, FLT_MAX, FLT_MAX}, mx{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        for (const Vec3& p : pts) {
+            mn = {std::min(mn.x, p.x), std::min(mn.y, p.y), std::min(mn.z, p.z)};
+            mx = {std::max(mx.x, p.x), std::max(mx.y, p.y), std::max(mx.z, p.z)};
+        }
+        return (mn + mx) * 0.5f;
+    }
+
+    static bool isLouverParentName(const std::string& name) {
+        if (containsCI(name, "Cloner") || containsCI(name, "middle_squares") ||
+            containsCI(name, "RIBS") || containsCI(name, "PIVOT") || containsCI(name, "HYDRAULIC")) {
+            return true;
+        }
+        if (containsCI(name, "TOP") && !containsCI(name, "top_and_middle") && !containsCI(name, "full_top") &&
+            !containsCI(name, "mid_top") && !containsCI(name, "top_decals")) {
+            return true;
+        }
+        return false;
+    }
+
     void walk(const aiScene* scene, const aiNode* node, const aiMatrix4x4& parent,
               const std::vector<uint32_t>& materialRemap, bool isPrimary, size_t& skipped, size_t& added) {
+        walk(scene, node, parent, materialRemap, isPrimary, skipped, added, LouverContext{});
+    }
+
+    void walk(const aiScene* scene, const aiNode* node, const aiMatrix4x4& parent,
+              const std::vector<uint32_t>& materialRemap, bool isPrimary, size_t& skipped, size_t& added,
+              LouverContext louver) {
         std::string nodeName = node->mName.C_Str();
         for (const auto& sub : cfg_.skipNodeSubstrings) {
             if (containsCI(nodeName, sub.c_str())) {
@@ -877,10 +890,67 @@ private:
             }
         }
         aiMatrix4x4 world = parent * node->mTransformation;
+        if (!louver.active && node->mNumChildren >= 6 && isLouverParentName(nodeName)) {
+            std::vector<Vec3> p0, n0, tA0, tB0, tC0;
+            std::vector<Vec3> p1, n1, tA1, tB1, tC1;
+            collectSubtreeTris(scene, node->mChildren[0], world, p0, n0, tA0, tB0, tC0);
+            collectSubtreeTris(scene, node->mChildren[1], world, p1, n1, tA1, tB1, tC1);
+            if (!p0.empty() && !p1.empty() && tA0.size() == tA1.size() && tA0.size() >= 10) {
+                Vec3 c0 = aabbCenter(p0);
+                Vec3 c1 = aabbCenter(p1);
+                Vec3 d = c1 - c0;
+                float step = length3(d);
+                if (step > 0.001f && step <= 0.045f) {
+                    Vec3 dir = d * (1.0f / step);
+                    float mnP = FLT_MAX, mxP = -FLT_MAX;
+                    for (const Vec3& v : p0) {
+                        float pr = dot(v, dir);
+                        mnP = std::min(mnP, pr);
+                        mxP = std::max(mxP, pr);
+                    }
+                    float span = mxP - mnP;
+                    float ratio = span > 0.0f ? step / span : 0.0f;
+                    if (ratio >= 1.02f && ratio <= 2.50f) {
+                        float midP = 0.5f * (mnP + mxP);
+                        float halfSpan = std::max(0.5f * span, 1e-5f);
+                        float minBevelT = 1.0f;
+                        for (size_t i = 0; i < p0.size(); ++i) {
+                            float t = std::fabs(dot(p0[i], dir) - midP) / halfSpan;
+                            float nd = std::fabs(dot(n0[i], dir));
+                            if (nd > 0.20f && nd < 0.90f && t > 0.25f) minBevelT = std::min(minBevelT, t);
+                        }
+                        float fMn = FLT_MAX, fMx = -FLT_MAX;
+                        int flatTris = 0;
+                        for (size_t i = 0; i < tA0.size(); ++i) {
+                            Vec3 fn = normalize(cross(tB0[i] - tA0[i], tC0[i] - tA0[i]));
+                            if (std::fabs(dot(fn, dir)) <= 0.25f) {
+                                flatTris++;
+                                for (const Vec3& v : {tA0[i], tB0[i], tC0[i]}) {
+                                    float pr = dot(v, dir);
+                                    fMn = std::min(fMn, pr);
+                                    fMx = std::max(fMx, pr);
+                                }
+                            }
+                        }
+                        if (flatTris > 0) {
+                            float flatSpan = fMx - fMn;
+                            louver.active = true;
+                            louver.dir = dir;
+                            louver.step = step;
+                            louver.ratio = ratio;
+                            louver.originProj = midP;
+                            louver.effBevelT = std::clamp(std::min(minBevelT, flatSpan / span), 0.25f, 1.0f);
+                            louver.expectedChildTris = tA0.size();
+                        }
+                    }
+                }
+            }
+        }
         if (node->mNumMeshes > 0) {
             // Bounds of this node instance in world space, used to detect duplicated geometry between the
             // exterior and interior files (the interior file contains part of the bistro building shell).
             Vec3 mn{FLT_MAX, FLT_MAX, FLT_MAX}, mx{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+            float mnP = FLT_MAX, mxP = -FLT_MAX;
             size_t nodeTris = 0;
             for (unsigned i = 0; i < node->mNumMeshes; ++i) {
                 const aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
@@ -889,6 +959,11 @@ private:
                     aiVector3D p = world * mesh->mVertices[v];
                     mn = {std::min(mn.x, p.x), std::min(mn.y, p.y), std::min(mn.z, p.z)};
                     mx = {std::max(mx.x, p.x), std::max(mx.y, p.y), std::max(mx.z, p.z)};
+                    if (louver.active) {
+                        float pr = p.x * louver.dir.x + p.y * louver.dir.y + p.z * louver.dir.z;
+                        mnP = std::min(mnP, pr);
+                        mxP = std::max(mxP, pr);
+                    }
                 }
             }
             bool duplicate = false;
@@ -912,9 +987,15 @@ private:
             } else {
                 added++;
                 bool isPolySel = containsCI(nodeName, "Polygon_Selection");
+                bool useLouver = louver.active && nodeTris == louver.expectedChildTris;
+                float midP = 0.5f * (mnP + mxP);
+                float halfSpan = std::max(0.5f * (mxP - mnP), 1e-5f);
                 for (unsigned i = 0; i < node->mNumMeshes; ++i) {
                     const aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
                     uint32_t matIdx = materialRemap[mesh->mMaterialIndex];
+                    if (useLouver) {
+                        matIdx = registerLouverMaterial(matIdx, louver.ratio >= 1.08f);
+                    }
                     const MaterialInfo& mi = materials_[matIdx];
                     int score = 10;
                     if (mi.name == "Default_Material" || mi.name == "lambert1") {
@@ -923,17 +1004,19 @@ private:
                         score = 50;
                     } else if (isPolySel && nodeTris < 1000) {
                         score = 40;
+                    } else if (useLouver) {
+                        score = 35;
                     } else if (!isPolySel && !mi.baseColor.empty()) {
                         score = 30;
                     } else if (!mi.baseColor.empty()) {
                         score = 20;
                     }
-                    addMesh(mesh, world, matIdx, score);
+                    addMesh(mesh, world, matIdx, score, useLouver ? &louver : nullptr, midP, halfSpan);
                 }
             }
         }
         for (unsigned c = 0; c < node->mNumChildren; ++c)
-            walk(scene, node->mChildren[c], world, materialRemap, isPrimary, skipped, added);
+            walk(scene, node->mChildren[c], world, materialRemap, isPrimary, skipped, added, louver);
     }
 
     bool isTranslucentMaterial(const std::string& name) const {
@@ -948,7 +1031,8 @@ private:
         return true;
     }
 
-    void addMesh(const aiMesh* mesh, const aiMatrix4x4& world, uint32_t material, int score) {
+    void addMesh(const aiMesh* mesh, const aiMatrix4x4& world, uint32_t material, int score,
+                 const LouverContext* louver = nullptr, float louverMidP = 0.0f, float louverHalfSpan = 1.0f) {
         if (!(mesh->mPrimitiveTypes & aiPrimitiveType_TRIANGLE) || !mesh->HasNormals()) return;
         MaterialGeometry& geo = geometry_[material];
         const MaterialInfo& mi = materials_[material];
@@ -961,7 +1045,7 @@ private:
                                 containsCI(mi.name, "Leaves") || containsCI(mi.name, "Curtain") ||
                                 containsCI(mi.name, "Lianas") || containsCI(mi.name, "Branches") ||
                                 classifyAlpha(mi) == bistro::kAlphaMask;
-        float grid = isFoliageOrCloth && cfg_.foliageWeldGrid > 0.0f ? cfg_.foliageWeldGrid : cfg_.weldGrid;
+        float grid = louver ? 0.0f : (isFoliageOrCloth && cfg_.foliageWeldGrid > 0.0f ? cfg_.foliageWeldGrid : cfg_.weldGrid);
 
         struct WeldKey {
             int32_t x, y, z, u, v, n;
@@ -980,6 +1064,8 @@ private:
         };
         std::unordered_map<WeldKey, uint32_t, WeldHash> welded;
         std::vector<uint32_t> vRemap(mesh->mNumVertices);
+        std::vector<Vec3> origPos;
+        if (louver) origPos.resize(mesh->mNumVertices);
         if (grid > 0.0f) welded.reserve(mesh->mNumVertices / 2 + 16);
 
         uint32_t base = static_cast<uint32_t>(geo.vertices.size());
@@ -987,6 +1073,7 @@ private:
             FullVertex fv;
             aiVector3D p = world * mesh->mVertices[v];
             fv.pos = {p.x, p.y, p.z};
+            if (louver) origPos[v] = fv.pos;
             aiVector3D n = normalMat * mesh->mNormals[v];
             fv.normal = normalize({n.x, n.y, n.z});
             if (mesh->HasTangentsAndBitangents()) {
@@ -1009,6 +1096,28 @@ private:
             if (mesh->HasTextureCoords(0)) {
                 fv.uv[0] = mesh->mTextureCoords[0][v].x;
                 fv.uv[1] = mesh->mTextureCoords[0][v].y;
+            }
+            if (louver) {
+                float pr = dot(fv.pos, louver->dir);
+                float t = std::clamp((pr - louverMidP) / louverHalfSpan, -1.0f, 1.0f);
+                float a = std::fabs(t);
+                float s = t >= 0.0f ? 1.0f : -1.0f;
+                float newOff = (a <= louver->effBevelT)
+                                   ? (0.505f * (a / std::max(louver->effBevelT, 1e-4f)))
+                                   : (0.505f + 0.005f * ((a - louver->effBevelT) / std::max(1.0f - louver->effBevelT, 1e-4f)));
+                float newPr = louverMidP + s * newOff * louver->step;
+                fv.pos = fv.pos + louver->dir * (newPr - pr);
+                Vec3 nPerp = fv.normal - louver->dir * dot(fv.normal, louver->dir);
+                if (dot(nPerp, nPerp) > 1e-6f) {
+                    fv.normal = normalize(nPerp);
+                } else {
+                    Vec3 axis = std::fabs(louver->dir.y) < 0.9f ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
+                    fv.normal = normalize(cross(axis, louver->dir));
+                }
+                fv.tangent = louver->dir;
+                fv.tangentSign = 1.0f;
+                fv.uv[0] = (newPr - louver->originProj) / louver->step;
+                fv.uv[1] = (louver->ratio >= 1.08f) ? louver->step : -louver->step;
             }
             if (grid > 0.0f) {
                 int32_t qx = static_cast<int32_t>(std::lround(fv.pos.x / grid));
@@ -1033,6 +1142,13 @@ private:
         for (unsigned f = 0; f < mesh->mNumFaces; ++f) {
             const aiFace& face = mesh->mFaces[f];
             if (face.mNumIndices != 3) continue;
+            if (louver) {
+                const Vec3& p0 = origPos[face.mIndices[0]];
+                const Vec3& p1 = origPos[face.mIndices[1]];
+                const Vec3& p2 = origPos[face.mIndices[2]];
+                Vec3 fn = normalize(cross(p1 - p0, p2 - p0));
+                if (std::fabs(dot(fn, louver->dir)) > 0.25f) continue;
+            }
             uint32_t a = vRemap[face.mIndices[0]], b = vRemap[face.mIndices[1]], c = vRemap[face.mIndices[2]];
             if (a == b || b == c || a == c) continue;
             if (flip) std::swap(b, c);
@@ -1056,7 +1172,7 @@ private:
         Vec3 ext = mx - mn;
         float maxExt = std::max(ext.x, std::max(ext.y, ext.z));
         uint32_t count = end - begin;
-        if (count <= kMaxClusterTriangles && (maxExt <= kMaxClusterExtent || count <= 64)) {
+        if (count <= kMaxClusterTriangles && (maxExt <= kMaxClusterExtent || count <= 8)) {
             leaves.emplace_back(begin, end);
             return;
         }

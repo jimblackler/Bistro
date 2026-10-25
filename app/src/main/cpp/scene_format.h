@@ -38,6 +38,7 @@ enum MaterialFlags : uint32_t {
     kMaterialEmissive = 1u << 1,
     // bit 2 is reserved: set at load time when the material has an ORM texture.
     kMaterialTranslucent = 1u << 3,  // thin leaf / fabric: transmits back-lit sunlight
+    kMaterialLouver = 1u << 4,       // analytical band-limited louver/slat grille (inUV.x = slat phase)
 };
 
 struct SceneHeader {
