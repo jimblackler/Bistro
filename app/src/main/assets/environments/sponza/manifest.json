@@ -1,0 +1,493 @@
+{
+  "id": "sponza",
+  "order": 2,
+  "title": "Intel Sponza",
+  "shortTitle": "Sponza",
+  "subtitle": "Atrium \u00b7 Curtains, Ivy & Cypress",
+  "attribution": "Intel GPU Research Samples \u00b7 Frank Meinl, Kubaizer, mawa \u00b7 CC BY 4.0",
+  "sourceDir": "source_assets/IntelSponza",
+  "textureDir": "textures",
+  "fbxFiles": [
+    "NewSponza_Main_glTF_003.gltf",
+    "NewSponza_Curtains_glTF.gltf",
+    "NewSponza_IvyGrowth_glTF.gltf",
+    "NewSponza_CypressTree_glTF.gltf"
+  ],
+  "hdrFile": "textures/kloppenheim_05_4k.hdr",
+  "licenseFile": "credits_license.txt",
+  "readmeFile": "credits_license.txt",
+  "aoRays": 32,
+  "aoMaxDistance": 30.0,
+  "aoMinVisibility": 0.18,
+  "aoMinOccluderArea": 0.002,
+  "weldGrid": 0.008,
+  "foliageWeldGrid": 0.025,
+  "foldConstantBaseColor": false,
+  "addCurtainGlass": false,
+  "deduplicateWithinScene": false,
+  "skipNodeSubstrings": [
+    "decals_",
+    "master_material"
+  ],
+  "pointLights": [
+    {
+      "position": [
+        -8.43,
+        3.55,
+        4.53
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        -4.87,
+        3.55,
+        4.54
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        -1.26,
+        3.55,
+        4.53
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        2.34,
+        3.55,
+        4.54
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        5.94,
+        3.55,
+        4.54
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        9.39,
+        3.55,
+        4.53
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        -8.43,
+        3.55,
+        -4.4
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        -4.87,
+        3.55,
+        -4.4
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        -1.26,
+        3.55,
+        -4.4
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        2.34,
+        3.55,
+        -4.4
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        5.94,
+        3.55,
+        -4.4
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        9.39,
+        3.55,
+        -4.4
+      ],
+      "range": 7.5,
+      "color": [
+        14.0,
+        8.5,
+        4.2
+      ]
+    },
+    {
+      "position": [
+        9.43,
+        8.38,
+        4.56
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        2.38,
+        8.38,
+        4.55
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        -4.83,
+        8.38,
+        4.56
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        -8.39,
+        8.38,
+        4.55
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        -8.39,
+        8.38,
+        -4.45
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        -4.83,
+        8.38,
+        -4.44
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        2.38,
+        8.38,
+        -4.45
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        9.43,
+        8.38,
+        -4.44
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        -11.09,
+        8.38,
+        1.9
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    },
+    {
+      "position": [
+        -11.09,
+        8.38,
+        -1.7
+      ],
+      "range": 8.0,
+      "color": [
+        15.0,
+        9.5,
+        4.8
+      ]
+    }
+  ],
+  "renderConfig": {
+    "emissiveIntensity": 8.0,
+    "bloomStrength": 0.08,
+    "exposureKey": 0.2,
+    "minExposure": 0.35,
+    "maxExposure": 2.4,
+    "fogDensity": 0.002,
+    "fogHeightFalloff": 0.08,
+    "fogBaseHeight": 0.0,
+    "fogMaxOpacity": 0.15,
+    "fogColor": [
+      0.75,
+      0.8,
+      0.88
+    ],
+    "sunAzimuthOffset": 0.0,
+    "sunIntensityScale": 1.2,
+    "pointLightScale": 1.0
+  },
+  "cameraLoops": [
+    {
+      "name": "Sponza Atrium & Upper Gallery",
+      "speed": 2.4,
+      "smoothWindow": 0.65,
+      "indoor": false,
+      "keyframes": [
+        [
+          [
+            6.8,
+            1.75,
+            -1.95
+          ],
+          [
+            -1.5,
+            3.2,
+            0.5
+          ]
+        ],
+        [
+          [
+            3.8,
+            1.75,
+            -2.05
+          ],
+          [
+            -0.5,
+            3.4,
+            2.5
+          ]
+        ],
+        [
+          [
+            0.2,
+            1.75,
+            -2.08
+          ],
+          [
+            -3.5,
+            3.8,
+            2.8
+          ]
+        ],
+        [
+          [
+            -3.6,
+            1.8,
+            -2.02
+          ],
+          [
+            -7.5,
+            4.6,
+            1.8
+          ]
+        ],
+        [
+          [
+            -6.6,
+            2.0,
+            -1.35
+          ],
+          [
+            -9.2,
+            5.5,
+            2.2
+          ]
+        ],
+        [
+          [
+            -6.8,
+            2.65,
+            0.85
+          ],
+          [
+            -8.8,
+            6.8,
+            3.2
+          ]
+        ],
+        [
+          [
+            -4.8,
+            4.1,
+            1.95
+          ],
+          [
+            0.0,
+            5.8,
+            0.0
+          ]
+        ],
+        [
+          [
+            -1.2,
+            5.8,
+            2.05
+          ],
+          [
+            2.5,
+            6.2,
+            -2.8
+          ]
+        ],
+        [
+          [
+            2.8,
+            7.05,
+            2.02
+          ],
+          [
+            -2.5,
+            6.8,
+            -3.2
+          ]
+        ],
+        [
+          [
+            6.2,
+            7.1,
+            1.35
+          ],
+          [
+            -5.5,
+            5.5,
+            0.0
+          ]
+        ],
+        [
+          [
+            6.6,
+            6.1,
+            -0.65
+          ],
+          [
+            -3.5,
+            4.2,
+            0.2
+          ]
+        ],
+        [
+          [
+            6.7,
+            3.6,
+            -1.75
+          ],
+          [
+            -1.0,
+            3.0,
+            0.3
+          ]
+        ]
+      ]
+    }
+  ]
+}
