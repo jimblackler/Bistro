@@ -27,6 +27,8 @@ set(SHADERS
     tonemap.frag
     taa.frag
     loading.frag
+    ao.comp
+    ao_blur.comp
 )
 set(SHADER_HEADERS "")
 foreach(SHADER ${SHADERS})

@@ -1,0 +1,97 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+// Half-resolution screen-space ambient occlusion (horizon based).
+// For every half-res pixel the full-res depth is turned back into a world position, a normal is
+// reconstructed from neighbouring depths, and 4 screen-space directions (both ways) are marched for
+// the highest occluding "horizon" within frame.aoParams.y metres. A static 4x4 interleaved rotation
+// pattern is removed again by the 4x4 depth-aware blur in ao_blur.comp.
+// Output: R = ambient visibility (1 = open), G = view depth (clip w) for reprojection in scene.frag.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 0) uniform sampler2D sceneDepth;
+layout(set = 1, binding = 1) uniform sampler2D aoInput;  // unused here (shared layout with the blur)
+layout(set = 1, binding = 2, rg16f) uniform writeonly image2D aoOut;
+
+layout(push_constant) uniform Push {
+    ivec2 fullSize;
+    ivec2 outSize;
+} pc;
+
+const int kDirections = 4;
+const int kSteps = 4;
+const float kNoDepth = 60000.0;
+
+vec3 worldAt(ivec2 fp, float d) {
+    vec2 ndc = (vec2(fp) + 0.5) / vec2(pc.fullSize) * 2.0 - 1.0;
+    vec4 w = frame.invViewProj * vec4(ndc, d, 1.0);
+    return w.xyz / w.w;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, pc.outSize))) return;
+    ivec2 fp = min(p * 2, pc.fullSize - 1);
+    float d0 = texelFetch(sceneDepth, fp, 0).r;
+    if (d0 <= 0.0) {  // sky (reversed-Z clear value)
+        imageStore(aoOut, p, vec4(1.0, kNoDepth, 0.0, 0.0));
+        return;
+    }
+    vec3 P = worldAt(fp, d0);
+    float viewZ = (frame.viewProj * vec4(P, 1.0)).w;
+
+    // Normal from the neighbouring depths, picking the side with the smaller depth step at edges.
+    ivec2 maxP = pc.fullSize - 1;
+    ivec2 xr = min(fp + ivec2(1, 0), maxP), xl = max(fp - ivec2(1, 0), ivec2(0));
+    ivec2 yd = min(fp + ivec2(0, 1), maxP), yu = max(fp - ivec2(0, 1), ivec2(0));
+    float dxr = texelFetch(sceneDepth, xr, 0).r, dxl = texelFetch(sceneDepth, xl, 0).r;
+    float dyd = texelFetch(sceneDepth, yd, 0).r, dyu = texelFetch(sceneDepth, yu, 0).r;
+    vec3 dx = abs(dxr - d0) < abs(dxl - d0) ? worldAt(xr, dxr) - P : P - worldAt(xl, dxl);
+    vec3 dy = abs(dyd - d0) < abs(dyu - d0) ? worldAt(yd, dyd) - P : P - worldAt(yu, dyu);
+    vec3 N = normalize(cross(dx, dy));
+    if (dot(N, frame.cameraPos.xyz - P) < 0.0) N = -N;
+
+    float radius = frame.aoParams.y;
+    // Projected radius in full-res pixels (cullParams.z = pixels per unit at view depth 1).
+    float radiusPx = radius * frame.cullParams.z / max(viewZ, 1e-3);
+    if (radiusPx < 2.0) {  // too far away for any visible contact shadow
+        imageStore(aoOut, p, vec4(1.0, viewZ, 0.0, 0.0));
+        return;
+    }
+    radiusPx = min(radiusPx, 96.0);
+
+    // Static 4x4 interleaved rotation and step jitter.
+    const float bayer[16] = float[](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
+                                    3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    int idx = (p.x & 3) + 4 * (p.y & 3);
+    float rot = (bayer[idx] + 0.5) / 16.0;
+    float stepJitter = fract(rot * 7.0 + 0.37);
+
+    float invR2 = 1.0 / (radius * radius);
+    float occlusion = 0.0;
+    for (int dir = 0; dir < kDirections; ++dir) {
+        float a = (float(dir) + rot) * (PI / float(kDirections));
+        vec2 dv = vec2(cos(a), sin(a));
+        for (int side = 0; side < 2; ++side) {
+            vec2 sdv = side == 0 ? dv : -dv;
+            float horizon = 0.0;
+            for (int s = 0; s < kSteps; ++s) {
+                float t = (float(s) + stepJitter) / float(kSteps);
+                vec2 offs = sdv * max(1.5, t * t * radiusPx);
+                ivec2 q = clamp(ivec2(vec2(fp) + offs), ivec2(0), maxP);
+                float dq = texelFetch(sceneDepth, q, 0).r;
+                if (dq <= 0.0) continue;
+                vec3 v = worldAt(q, dq) - P;
+                float l2 = dot(v, v);
+                float cosH = dot(N, v) * inversesqrt(max(l2, 1e-6));
+                float occ = clamp(cosH - 0.12, 0.0, 1.0) * clamp(1.0 - l2 * invR2, 0.0, 1.0);
+                horizon = max(horizon, occ);
+            }
+            occlusion += horizon;
+        }
+    }
+    float visibility = clamp(1.0 - occlusion / float(kDirections * 2) * 1.15, 0.0, 1.0);
+    visibility = pow(visibility, frame.aoParams.z);
+    imageStore(aoOut, p, vec4(visibility, viewZ, 0.0, 0.0));
+}

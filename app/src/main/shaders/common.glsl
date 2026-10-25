@@ -60,6 +60,7 @@ layout(set = 0, binding = 0, std140) uniform FrameUniforms {
     vec4 exposureParams2; // x = adaptation speed (1/s), y = auto exposure enabled, z = camera indoors, w = translucency
     vec4 occlusionParams; // x = Hi-Z width, y = Hi-Z height, z = Hi-Z mip count, w = occlusion culling enabled
     vec4 taaParams;       // xy = projection jitter (NDC), z = history feedback, w = history valid
+    vec4 aoParams;        // x = previous frame's SSAO valid, y = radius (m), z = intensity exponent, w = debug view
     PointLight lights[MAX_POINT_LIGHTS];
     uvec4 lightCount;
 } frame;
@@ -71,6 +72,8 @@ layout(set = 0, binding = 6) uniform sampler2D skyTexture;
 layout(set = 0, binding = 7) uniform sampler2D envSpecular;
 layout(set = 0, binding = 8) uniform sampler2D hdrTexture;
 layout(set = 0, binding = 9) uniform sampler2D bloomTexture;
+// Previous frame's half-res SSAO (R = ambient visibility, G = view depth), reprojected in scene.frag.
+layout(set = 0, binding = 10) uniform sampler2D aoTexture;
 layout(set = 0, binding = 11, std430) buffer ExposureBuffer {
     float exposure;   // adapted exposure multiplier
     float avgLogLum;  // measured log2 luminance

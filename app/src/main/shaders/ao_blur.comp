@@ -1,0 +1,35 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+// 4x4 depth-aware box blur of the half-res SSAO. The 4x4 footprint exactly covers the interleaved
+// rotation pattern used by ao.comp, so the pattern averages out; taps on a different surface (view
+// depth differing by more than a few percent) are rejected so occlusion does not bleed across edges.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 0) uniform sampler2D sceneDepth;  // unused here (shared layout)
+layout(set = 1, binding = 1) uniform sampler2D aoInput;
+layout(set = 1, binding = 2, rg16f) uniform writeonly image2D aoOut;
+
+layout(push_constant) uniform Push {
+    ivec2 fullSize;
+    ivec2 outSize;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, pc.outSize))) return;
+    vec2 c = texelFetch(aoInput, p, 0).rg;
+    float z0 = c.g;
+    float sum = 0.0, wsum = 0.0;
+    for (int y = -2; y <= 1; ++y) {
+        for (int x = -2; x <= 1; ++x) {
+            ivec2 q = clamp(p + ivec2(x, y), ivec2(0), pc.outSize - 1);
+            vec2 s = texelFetch(aoInput, q, 0).rg;
+            float w = clamp(1.0 - abs(s.g - z0) / (0.04 * z0), 0.0, 1.0);
+            sum += s.r * w;
+            wsum += w;
+        }
+    }
+    imageStore(aoOut, p, vec4(wsum > 0.0 ? sum / wsum : c.r, z0, 0.0, 0.0));
+}

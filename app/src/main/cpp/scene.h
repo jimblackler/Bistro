@@ -57,6 +57,8 @@ struct RenderConfig {
     float sunIntensityScale = 2.2f;
     float pointLightScale = 0.030f;
     float translucency = 1.0f;  // strength of back-lit transmission through kMaterialTranslucent materials
+    float aoRadius = 0.8f;      // screen-space AO search radius (m)
+    float aoIntensity = 1.0f;   // screen-space AO exponent (0 disables)
 };
 
 constexpr uint32_t kBucketOpaque = 0;

@@ -57,6 +57,12 @@ alignas(4) const uint32_t kTaaFrag[] =
 alignas(4) const uint32_t kLoadingFrag[] =
 #include "loading.frag.spv.h"
 ;
+alignas(4) const uint32_t kAoComp[] =
+#include "ao.comp.spv.h"
+;
+alignas(4) const uint32_t kAoBlurComp[] =
+#include "ao_blur.comp.spv.h"
+;
 
 constexpr float kFovY = 52.0f * 3.14159265f / 180.0f;
 constexpr float kNearPlane = 0.1f;
@@ -101,10 +107,11 @@ struct alignas(16) FrameUniforms {
     float exposureParams2[4];
     float occlusionParams[4];
     float taaParams[4];
+    float aoParams[4];
     float lights[8][8];
     uint32_t lightCount[4];
 };
-static_assert(sizeof(FrameUniforms) == 1072, "FrameUniforms must match the std140 layout in common.glsl");
+static_assert(sizeof(FrameUniforms) == 1088, "FrameUniforms must match the std140 layout in common.glsl");
 
 struct LoadingPush {
     float outputSize[2];
@@ -144,6 +151,8 @@ bool Renderer::init(AAssetManager* assets) {
     occlusionCulling_ = debugProperty("debug.bistro.occlusion", 1.0f) > 0.5f;
     buildHiz_ = debugProperty("debug.bistro.hiz", 1.0f) > 0.5f;
     skyDebug_ = debugProperty("debug.bistro.skydebug", 0.0f) > 0.5f;
+    aoEnabled_ = debugProperty("debug.bistro.ao", 1.0f) > 0.5f;
+    aoDebug_ = debugProperty("debug.bistro.aodebug", 0.0f) > 0.5f;
     if (!ctx_.init()) {
         initFailed_ = true;
         return false;
@@ -214,6 +223,7 @@ bool Renderer::createDescriptorLayouts() {
     add(7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     add(8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     add(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    add(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     add(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     add(13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     add(15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096);
@@ -265,6 +275,20 @@ bool Renderer::createDescriptorLayouts() {
     tlci.pBindings = taaBindings;
     if (vkCreateDescriptorSetLayout(ctx_.device, &tlci, nullptr, &taaSetLayout_) != VK_SUCCESS) return false;
 
+    // SSAO compute: 0 = scene depth, 1 = AO input (blur), 2 = AO output (storage).
+    VkDescriptorSetLayoutBinding aoBindings[3] = {};
+    for (uint32_t i = 0; i < 3; ++i) {
+        aoBindings[i].binding = i;
+        aoBindings[i].descriptorType =
+            i == 2 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        aoBindings[i].descriptorCount = 1;
+        aoBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo alci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    alci.bindingCount = 3;
+    alci.pBindings = aoBindings;
+    if (vkCreateDescriptorSetLayout(ctx_.device, &alci, nullptr, &aoSetLayout_) != VK_SUCCESS) return false;
+
     VkPushConstantRange range{kAllStages, 0, kPushConstantSize};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
@@ -282,16 +306,20 @@ bool Renderer::createDescriptorLayouts() {
     VkDescriptorSetLayout taaSets[2] = {globalSetLayout_, taaSetLayout_};
     pli.pSetLayouts = taaSets;
     if (vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &taaLayout_) != VK_SUCCESS) return false;
+    VkDescriptorSetLayout aoSets[2] = {globalSetLayout_, aoSetLayout_};
+    pli.pSetLayouts = aoSets;
+    if (vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &aoLayout_) != VK_SUCCESS) return false;
 
+    const uint32_t aoSetCount = static_cast<uint32_t>(aoSets_.size());
     VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-         (4096 + 6) * kFramesInFlight + kBloomLevels + 2 + kMaxHizLevels + 3 * kFramesInFlight},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxHizLevels},
+         (4096 + 7) * kFramesInFlight + kBloomLevels + 2 + kMaxHizLevels + 3 * kFramesInFlight + 2 * aoSetCount},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxHizLevels + aoSetCount},
     };
     VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pci.maxSets = kFramesInFlight * 2 + kBloomLevels + 2 + kMaxHizLevels;
+    pci.maxSets = kFramesInFlight * 2 + kBloomLevels + 2 + kMaxHizLevels + aoSetCount;
     pci.poolSizeCount = 4;
     pci.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(ctx_.device, &pci, nullptr, &descriptorPool_) != VK_SUCCESS) return false;
@@ -328,6 +356,13 @@ bool Renderer::createDescriptorLayouts() {
         ai.descriptorPool = descriptorPool_;
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &taaSetLayout_;
+        if (vkAllocateDescriptorSets(ctx_.device, &ai, &s) != VK_SUCCESS) return false;
+    }
+    for (auto& s : aoSets_) {
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = descriptorPool_;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &aoSetLayout_;
         if (vkAllocateDescriptorSets(ctx_.device, &ai, &s) != VK_SUCCESS) return false;
     }
     return true;
@@ -428,18 +463,20 @@ bool Renderer::createGlobalResources() {
     if (debugProperty("debug.bistro.msaa", 1.0f) >= 4.0f && (counts & VK_SAMPLE_COUNT_4_BIT))
         msaaSamples_ = VK_SAMPLE_COUNT_4_BIT;
     taaEnabled_ = msaaSamples_ == VK_SAMPLE_COUNT_1_BIT && debugProperty("debug.bistro.taa", 1.0f) > 0.5f;
+    // SSAO reads the single-sample depth, which the MSAA path only resolves when building Hi-Z.
+    if (msaaSamples_ != VK_SAMPLE_COUNT_1_BIT && !buildHiz_) aoEnabled_ = false;
     LOGI("HDR format %d, depth format %d, MSAA x%d", hdrFormat_, depthFormat_, msaaSamples_);
     return true;
 }
 
-VkPipeline Renderer::createComputePipeline(const uint32_t* cs, size_t size, const char* name) {
+VkPipeline Renderer::createComputePipeline(const uint32_t* cs, size_t size, const char* name, VkPipelineLayout layout) {
     VkShaderModule module = ctx_.createShaderModule(cs, size);
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     ci.stage.module = module;
     ci.stage.pName = "main";
-    ci.layout = pipelineLayout_;
+    ci.layout = layout ? layout : pipelineLayout_;
     VkPipeline p = VK_NULL_HANDLE;
     if (vkCreateComputePipelines(ctx_.device, VK_NULL_HANDLE, 1, &ci, nullptr, &p) != VK_SUCCESS)
         LOGE("Failed to create compute pipeline %s", name);
@@ -581,6 +618,8 @@ VkPipeline Renderer::createGraphicsPipeline(const uint32_t* vs, size_t vsSize, c
 bool Renderer::createPipelines() {
     cullPipeline_ = createComputePipeline(kCullComp, sizeof(kCullComp), "GPU Cluster Culling");
     exposurePipeline_ = createComputePipeline(kExposureComp, sizeof(kExposureComp), "Auto Exposure");
+    aoPipeline_ = createComputePipeline(kAoComp, sizeof(kAoComp), "SSAO", aoLayout_);
+    aoBlurPipeline_ = createComputePipeline(kAoBlurComp, sizeof(kAoBlurComp), "SSAO Blur", aoLayout_);
     {
         VkShaderModule module = ctx_.createShaderModule(kHizComp, sizeof(kHizComp));
         VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
@@ -594,13 +633,14 @@ bool Renderer::createPipelines() {
         VulkanDebug::setObjectName(ctx_.device, hizPipeline_, VK_OBJECT_TYPE_PIPELINE, "Hi-Z Pyramid Build");
     }
     const VkCompareOp reversedZ = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    const VkCompareOp reversedZStrict = VK_COMPARE_OP_GREATER;
     opaquePipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), kSceneFrag, sizeof(kSceneFrag),
                                              pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
-                                             VK_CULL_MODE_NONE, true, true, reversedZ, kBlendNone, false, 0,
+                                             VK_CULL_MODE_NONE, true, true, reversedZStrict, kBlendNone, false, 0,
                                              false, "Scene Opaque");
     maskPipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), kSceneFrag, sizeof(kSceneFrag),
                                            pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
-                                           VK_CULL_MODE_NONE, true, true, reversedZ, kBlendNone,
+                                           VK_CULL_MODE_NONE, true, true, reversedZStrict, kBlendNone,
                                            msaaSamples_ != VK_SAMPLE_COUNT_1_BIT &&
                                                debugProperty("debug.bistro.a2c", 1.0f) > 0.5f,
                                            1, true, "Scene Alpha Mask");
@@ -634,7 +674,8 @@ bool Renderer::createPipelines() {
                                               VK_SAMPLE_COUNT_1_BIT, false, VK_CULL_MODE_NONE, false, false,
                                               VK_COMPARE_OP_ALWAYS, kBlendAdditive, false, 0, false, "Bloom Upsample");
     return cullPipeline_ && exposurePipeline_ && hizPipeline_ && taaPipeline_ && opaquePipeline_ && maskPipeline_ && blendPipeline_ &&
-           skyPipeline_ && shadowOpaquePipeline_ && shadowMaskPipeline_ && bloomDownPipeline_ && bloomUpPipeline_;
+           skyPipeline_ && shadowOpaquePipeline_ && shadowMaskPipeline_ && bloomDownPipeline_ && bloomUpPipeline_ &&
+           aoPipeline_ && aoBlurPipeline_;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -873,6 +914,30 @@ bool Renderer::createRenderTargets() {
     }
     hizValid_ = false;
 
+    // Half-resolution SSAO targets (RG16F: visibility, view depth).
+    aoExtent_ = {std::max(1u, (renderExtent_.width + 1) / 2), std::max(1u, (renderExtent_.height + 1) / 2)};
+    {
+        ImageDesc a;
+        a.width = aoExtent_.width;
+        a.height = aoExtent_.height;
+        a.format = VK_FORMAT_R16G16_SFLOAT;
+        a.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        a.name = "SSAO Raw";
+        if (!ctx_.createImage(a, aoRaw_)) return false;
+        for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+            a.name = i == 0 ? "SSAO A" : "SSAO B";
+            if (!ctx_.createImage(a, ao_[i])) return false;
+        }
+        VkCommandBuffer cmd = ctx_.beginOneShot();
+        for (GpuImage* img : {&aoRaw_, &ao_[0], &ao_[1]}) {
+            imageBarrier(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                         VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        }
+        ctx_.endOneShot(cmd);
+    }
+    aoValid_ = false;
+
     stats_.renderWidth = renderExtent_.width;
     stats_.renderHeight = renderExtent_.height;
     writeRenderTargetDescriptors();
@@ -890,6 +955,8 @@ void Renderer::destroyRenderTargets() {
         v = VK_NULL_HANDLE;
     }
     ctx_.destroyImage(hiz_);
+    ctx_.destroyImage(aoRaw_);
+    for (auto& a : ao_) ctx_.destroyImage(a);
     ctx_.destroyImage(depthResolve_);
     for (auto& t : taaOutput_) ctx_.destroyImage(t);
     ctx_.destroyImage(bloom_);
@@ -946,6 +1013,38 @@ void Renderer::writeRenderTargetDescriptors() {
         w.pImageInfo = &hizInfo;
         writes.push_back(w);
     }
+    // SSAO: frame slot i reads the AO written by the previous frame, i.e. slot (i + 1) % 2.
+    std::array<VkDescriptorImageInfo, kFramesInFlight> aoPrevInfos{};
+    std::array<VkDescriptorImageInfo, kFramesInFlight> aoOutInfos{};
+    VkDescriptorImageInfo aoDepthInfo{nearestSampler_, depthResolve_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo aoRawSampled{nearestSampler_, aoRaw_.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo aoRawStorage{VK_NULL_HANDLE, aoRaw_.view, VK_IMAGE_LAYOUT_GENERAL};
+    for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+        aoPrevInfos[i] = {linearClampSampler_, ao_[(i + 1) % kFramesInFlight].view, VK_IMAGE_LAYOUT_GENERAL};
+        aoOutInfos[i] = {VK_NULL_HANDLE, ao_[i].view, VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.dstSet = frames_[i].set;
+        w.dstBinding = 10;
+        w.pImageInfo = &aoPrevInfos[i];
+        writes.push_back(w);
+        for (uint32_t pass = 0; pass < 2; ++pass) {
+            VkDescriptorSet set = aoSets_[i * 2 + pass];
+            w.dstSet = set;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w.dstBinding = 0;
+            w.pImageInfo = &aoDepthInfo;
+            writes.push_back(w);
+            w.dstBinding = 1;
+            w.pImageInfo = &aoRawSampled;
+            writes.push_back(w);
+            w.dstBinding = 2;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w.pImageInfo = pass == 0 ? &aoRawStorage : &aoOutInfos[i];
+            writes.push_back(w);
+        }
+    }
     std::array<VkDescriptorImageInfo, kMaxHizLevels> hizSrc{};
     std::array<VkDescriptorImageInfo, kMaxHizLevels> hizDst{};
     for (uint32_t i = 0; i < hizMipCount_; ++i) {
@@ -985,8 +1084,11 @@ void Renderer::writeRenderTargetDescriptors() {
 void Renderer::writeStaticDescriptors() {
     const uint32_t capacity = static_cast<uint32_t>(scene_.clusters.size());
     std::vector<VkDescriptorImageInfo> texInfos(scene_.textures.size());
-    for (size_t i = 0; i < scene_.textures.size(); ++i)
-        texInfos[i] = {materialSampler_, scene_.textures[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkImageView fallbackView = scene_.textures.size() >= 4 ? scene_.textures[scene_.textures.size() - 4].view : VK_NULL_HANDLE;
+    for (size_t i = 0; i < scene_.textures.size(); ++i) {
+        VkImageView view = scene_.textures[i].view ? scene_.textures[i].view : fallbackView;
+        texInfos[i] = {materialSampler_, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
     VkDescriptorImageInfo shadowInfo{shadowSampler_, shadowMap_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo skyInfo{envSampler_, scene_.sky.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo specInfo{envSampler_, scene_.envSpecular.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -1289,6 +1391,10 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
     u.occlusionParams[1] = static_cast<float>(hizExtent_.height);
     u.occlusionParams[2] = static_cast<float>(hizMipCount_);
     u.occlusionParams[3] = (occlusionCulling_ && hizValid_) ? 1.0f : 0.0f;
+    u.aoParams[0] = (aoEnabled_ && aoValid_ && rc.aoIntensity > 0.0f) ? 1.0f : 0.0f;
+    u.aoParams[1] = rc.aoRadius;
+    u.aoParams[2] = rc.aoIntensity;
+    u.aoParams[3] = aoDebug_ ? 1.0f : 0.0f;
     uint32_t lightCount = static_cast<uint32_t>(pointLights_.size() / 2);
     for (uint32_t i = 0; i < lightCount; ++i) {
         memcpy(&u.lights[i][0], &pointLights_[i * 2], sizeof(Vec4));
@@ -1510,7 +1616,36 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &frame.set, 0, nullptr);
     }
 
-    // 4. Temporal anti-aliasing resolve into this frame slot's history image.
+    // 4. Screen-space AO from this frame's depth (consumed, reprojected, by the next frame's shading).
+    if (aoEnabled_) {
+        ScopedCmdLabel label(cmd, "SSAO", DebugColors::Transfer);
+        // aoRaw_ was read by the previous frame's blur and ao_[slot] by the frame before last's shading.
+        memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        int32_t push[4] = {static_cast<int32_t>(renderExtent_.width), static_cast<int32_t>(renderExtent_.height),
+                           static_cast<int32_t>(aoExtent_.width), static_cast<int32_t>(aoExtent_.height)};
+        const uint32_t gx = (aoExtent_.width + 7) / 8, gy = (aoExtent_.height + 7) / 8;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoLayout_, 0, 1, &frame.set, 0, nullptr);
+        vkCmdPushConstants(cmd, aoLayout_, kAllStages, 0, sizeof(push), push);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoLayout_, 1, 1, &aoSets_[frameIndex_ * 2], 0,
+                                nullptr);
+        vkCmdDispatch(cmd, gx, gy, 1);
+        memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoBlurPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoLayout_, 1, 1, &aoSets_[frameIndex_ * 2 + 1],
+                                0, nullptr);
+        vkCmdDispatch(cmd, gx, gy, 1);
+        // The next frame's scene shading samples the result.
+        memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        aoValid_ = true;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &frame.set, 0, nullptr);
+    }
+
+    // 5. Temporal anti-aliasing resolve into this frame slot's history image.
     if (taaEnabled_) {
         ScopedCmdLabel label(cmd, "TAA Resolve", DebugColors::RenderPass);
         GpuImage& out = taaOutput_[frameIndex_];
@@ -1544,7 +1679,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
         taaHistoryValid_ = true;
     }
 
-    // 5. Auto exposure.
+    // 6. Auto exposure.
     {
         ScopedCmdLabel label(cmd, "Auto Exposure", DebugColors::Transfer);
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
@@ -1555,7 +1690,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     }
 
-    // 6. Bloom: progressive downsample then additive upsample.
+    // 7. Bloom: progressive downsample then additive upsample.
     {
         ScopedCmdLabel label(cmd, "Bloom", DebugColors::RenderPass);
         auto beginPass = [&](uint32_t mip, bool load) {
@@ -1624,7 +1759,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
         }
     }
 
-    // 7. Tone map into the swapchain image (with pre-rotation).
+    // 8. Tone map into the swapchain image (with pre-rotation).
     {
         ScopedCmdLabel label(cmd, "Tonemap + Present", DebugColors::RenderPass);
         VkImage image = swapchainImages_[imageIndex];
@@ -1783,7 +1918,7 @@ void Renderer::destroy() {
     ctx_.destroyBuffer(shadowDraws_);
     for (VkPipeline p : {cullPipeline_, exposurePipeline_, hizPipeline_, taaPipeline_, opaquePipeline_, maskPipeline_, blendPipeline_, skyPipeline_,
                          shadowOpaquePipeline_, shadowMaskPipeline_, bloomDownPipeline_, bloomUpPipeline_,
-                         tonemapPipeline_, loadingPipeline_}) {
+                         tonemapPipeline_, loadingPipeline_, aoPipeline_, aoBlurPipeline_}) {
         if (p) vkDestroyPipeline(dev, p, nullptr);
     }
     for (VkSampler s : {materialSampler_, linearClampSampler_, envSampler_, shadowSampler_, nearestSampler_}) {
@@ -1795,6 +1930,8 @@ void Renderer::destroy() {
     if (postLayout_) vkDestroyPipelineLayout(dev, postLayout_, nullptr);
     if (hizLayout_) vkDestroyPipelineLayout(dev, hizLayout_, nullptr);
     if (taaLayout_) vkDestroyPipelineLayout(dev, taaLayout_, nullptr);
+    if (aoLayout_) vkDestroyPipelineLayout(dev, aoLayout_, nullptr);
+    if (aoSetLayout_) vkDestroyDescriptorSetLayout(dev, aoSetLayout_, nullptr);
     if (taaSetLayout_) vkDestroyDescriptorSetLayout(dev, taaSetLayout_, nullptr);
     if (hizSetLayout_) vkDestroyDescriptorSetLayout(dev, hizSetLayout_, nullptr);
     if (globalSetLayout_) vkDestroyDescriptorSetLayout(dev, globalSetLayout_, nullptr);

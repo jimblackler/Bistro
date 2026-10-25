@@ -63,6 +63,7 @@ public:
     void invalidateHistory() {
         hizValid_ = false;
         taaHistoryValid_ = false;
+        aoValid_ = false;
     }
 
 private:
@@ -93,7 +94,8 @@ private:
                                       bool depthTest, bool depthWrite, VkCompareOp depthCompare, int blendMode,
                                       bool alphaToCoverage, uint32_t alphaModeConstant, bool depthBias,
                                       const char* name, VkPipelineLayout layoutOverride = VK_NULL_HANDLE);
-    VkPipeline createComputePipeline(const uint32_t* cs, size_t size, const char* name);
+    VkPipeline createComputePipeline(const uint32_t* cs, size_t size, const char* name,
+                                     VkPipelineLayout layout = VK_NULL_HANDLE);
     bool createSwapchain();
     void destroySwapchain();
     bool createRenderTargets();
@@ -163,6 +165,19 @@ private:
     bool occlusionCulling_ = true;
     bool buildHiz_ = true;
     bool skyDebug_ = false;  // `setprop debug.bistro.skydebug 1`: paint the sky magenta to find leaks
+    // Screen-space AO (`setprop debug.bistro.ao 0` disables). Computed at half resolution after the main
+    // pass into ao_[frame slot] and reprojected by the next frame's scene shading.
+    bool aoEnabled_ = true;
+    bool aoDebug_ = false;  // `setprop debug.bistro.aodebug 1`: show the ambient occlusion term only
+    bool aoValid_ = false;
+    VkExtent2D aoExtent_{};
+    GpuImage aoRaw_;
+    std::array<GpuImage, kFramesInFlight> ao_;
+    std::array<VkDescriptorSet, kFramesInFlight * 2> aoSets_{};  // [slot * 2] = AO, [slot * 2 + 1] = blur
+    VkDescriptorSetLayout aoSetLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout aoLayout_ = VK_NULL_HANDLE;
+    VkPipeline aoPipeline_ = VK_NULL_HANDLE;
+    VkPipeline aoBlurPipeline_ = VK_NULL_HANDLE;
     std::array<VkImageView, kBloomLevels> bloomViews_{};
     std::array<VkExtent2D, kBloomLevels> bloomExtents_{};
 

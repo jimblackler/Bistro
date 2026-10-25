@@ -138,6 +138,8 @@ bool Scene::loadManifest() {
         renderConfig.sunIntensityScale = parseJsonFloat(sub, "sunIntensityScale", renderConfig.sunIntensityScale);
         renderConfig.pointLightScale = parseJsonFloat(sub, "pointLightScale", renderConfig.pointLightScale);
         renderConfig.translucency = parseJsonFloat(sub, "translucency", renderConfig.translucency);
+        renderConfig.aoRadius = parseJsonFloat(sub, "aoRadius", renderConfig.aoRadius);
+        renderConfig.aoIntensity = parseJsonFloat(sub, "aoIntensity", renderConfig.aoIntensity);
     }
     return true;
 }
@@ -354,17 +356,19 @@ bool Scene::loadTexture(const std::string& path, GpuImage& out, const char* debu
         LOGE("Unsupported texture format in %s", path.c_str());
         return false;
     }
+    uint32_t maxVkMips = static_cast<uint32_t>(std::floor(std::log2(std::max(1u, std::max(th.width, th.height))))) + 1u;
+    uint32_t mipCount = std::min(th.mipCount, maxVkMips);
     ImageDesc d;
     d.width = th.width;
     d.height = th.height;
-    d.mipLevels = th.mipCount;
+    d.mipLevels = mipCount;
     d.format = format;
     d.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     d.name = debugName;
     if (!ctx_->createImage(d, out)) return false;
 
     transitionForUpload(ctx_, {&out}, true);
-    for (uint32_t i = 0; i < th.mipCount; ++i) {
+    for (uint32_t i = 0; i < mipCount; ++i) {
         uint32_t w = std::max(1u, th.width >> i);
         uint32_t h = std::max(1u, th.height >> i);
         if (levels[i].offset + levels[i].size > file.size()) {
