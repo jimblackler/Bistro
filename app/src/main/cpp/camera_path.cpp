@@ -1,91 +1,11 @@
 #include "camera_path.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 
 namespace {
-
-// Exterior keyframes (world space, metres) for the first fly-through loop. Each keyframe specifies
-// both the camera eye position and a look-at target so that through turnarounds the camera looks back
-// down the street or across the bistro terrace rather than toward the unmodeled outer edges of the asset.
-const CameraPath::Keyframe kExteriorKeyframes[] = {
-    // Plaza into East Street, turning right to look at the East Street Book Store window.
-    {{61.0f, 5.5f, 30.0f}, {48.0f, 3.5f, 24.5f}},
-    {{50.0f, 4.3f, 31.0f}, {53.0f, 2.6f, 22.0f}},
-    // Turn left to look at the East Street Boulangerie / Bakery storefront window.
-    {{40.0f, 3.8f, 28.5f}, {39.0f, 2.6f, 38.5f}},
-    {{28.0f, 3.4f, 23.5f}, {14.0f, 2.8f, 17.5f}},
-    // Pass under the archway and turn right toward the Bistro East Terrace tables and menu board.
-    {{16.0f, 3.1f, 19.5f}, {4.0f, 2.0f, 9.5f}},
-    {{6.5f, 3.0f, 14.5f}, {-1.5f, 1.8f, 7.0f}},
-    // Round the Bistro corner, looking at the Blue Vespa scooter and Le Petit Coin corner entrance.
-    {{-5.0f, 3.0f, 11.5f}, {-7.8f, 1.5f, 0.2f}},
-    {{-11.0f, 3.1f, 5.5f}, {-2.5f, 2.4f, -2.0f}},
-    // Enter North Street, glancing at the West Terrace tables and lit Bistro windows.
-    {{-13.5f, 3.2f, -5.5f}, {-1.5f, 2.2f, -9.5f}},
-    // Turn right to look into the North Street Boulangerie / Patisserie display windows.
-    {{-4.5f, 3.2f, -15.5f}, {6.5f, 2.7f, -19.8f}},
-    {{2.5f, 3.2f, -23.5f}, {11.8f, 2.8f, -26.2f}},
-    // Turn right to look into the Librairie / Book Store display windows.
-    {{9.5f, 3.2f, -31.5f}, {17.2f, 2.6f, -33.8f}},
-    {{13.0f, 3.3f, -36.5f}, {19.2f, 2.6f, -36.8f}},
-    // Turn left across the street to look into the West Side shop display windows.
-    {{16.0f, 3.4f, -42.5f}, {5.8f, 2.6f, -43.8f}},
-    {{18.5f, 3.6f, -47.0f}, {9.5f, 2.8f, -48.0f}},
-    // North end turnaround: pan smoothly across the east facade while beginning to climb.
-    {{20.5f, 4.4f, -50.5f}, {24.0f, 5.0f, -45.0f}},
-    {{19.0f, 6.8f, -47.5f}, {12.0f, 8.0f, -34.0f}},
-    // Return journey: rise up to top-storey height, looking at the upper balconies and Bistro turret.
-    {{12.5f, 10.5f, -37.0f}, {6.0f, 12.0f, -22.0f}},
-    {{4.5f, 14.5f, -24.0f}, {2.0f, 14.0f, -9.0f}},
-    {{-6.0f, 18.8f, -9.0f}, {-2.0f, 14.0f, 3.0f}},
-    // Fly across the top-storey outdoor terrace above the south building, looking over its iron railing.
-    {{-16.2f, 21.5f, 7.5f}, {-10.0f, 16.5f, 14.0f}},
-    {{-15.8f, 21.4f, 11.5f}, {-3.0f, 13.5f, 11.0f}},
-    {{-11.0f, 21.5f, 15.0f}, {4.0f, 10.5f, 15.0f}},
-    // Swoop down from the top-storey terrace over the intersection to pass under the archway.
-    {{-5.5f, 14.0f, 14.5f}, {10.0f, 6.0f, 17.5f}},
-    {{5.5f, 4.6f, 16.5f}, {24.0f, 4.5f, 23.0f}},
-    {{16.5f, 5.2f, 19.5f}, {36.0f, 5.0f, 26.5f}},
-    {{28.0f, 5.8f, 24.0f}, {48.0f, 5.5f, 29.0f}},
-    {{40.0f, 6.4f, 27.5f}, {62.0f, 6.0f, 32.0f}},
-    {{52.0f, 6.8f, 28.0f}, {72.0f, 6.2f, 36.0f}},
-    // Circle around the plaza tree while keeping the camera aimed inward at the tree and plaza facades.
-    {{66.0f, 7.2f, 22.0f}, {72.0f, 5.5f, 38.0f}},
-    {{79.0f, 7.4f, 24.0f}, {68.0f, 5.2f, 38.0f}},
-    {{83.5f, 7.0f, 31.0f}, {62.0f, 4.8f, 34.0f}},
-    {{74.5f, 6.2f, 28.0f}, {48.0f, 4.2f, 29.5f}},
-};
-constexpr int kNumExteriorPoints = sizeof(kExteriorKeyframes) / sizeof(kExteriorKeyframes[0]);
-
-// Restaurant interior keyframes (world space, metres) for the second fly-through loop.
-// Glides through the bistro dining room, past the window booths, into the back wine alcove,
-// along the zinc bar counter (espresso machine, beer taps, liquor shelves, cash register),
-// and back through the centre aisle of set tables.
-const CameraPath::Keyframe kInteriorKeyframes[] = {
-    // Near the front corner entrance, looking across the dining room toward the bar counter.
-    {{0.64f, 3.20f, -2.88f}, {10.88f, 2.88f, -3.52f}},
-    // Glide north along the west window tables, looking at the set tables and bar.
-    {{2.40f, 3.20f, -4.64f}, {10.40f, 2.88f, -5.60f}},
-    {{4.32f, 3.28f, -7.20f}, {9.28f, 3.04f, -10.88f}},
-    // Peer into the north dining room / wine alcove, panning across the wine racks and paintings.
-    {{5.76f, 3.28f, -8.48f}, {9.92f, 3.20f, -13.60f}},
-    {{6.88f, 3.28f, -8.00f}, {10.88f, 3.04f, -9.92f}},
-    // Turn south-east toward the curved end of the zinc bar counter and espresso machine.
-    {{7.52f, 3.232f, -6.56f}, {11.84f, 2.96f, -4.80f}},
-    {{7.68f, 3.20f, -5.12f}, {12.64f, 2.96f, -3.84f}},
-    // Cruise parallel to the bar stools, looking closely at the beer taps, bottles, and cash register.
-    {{8.96f, 3.12f, -3.68f}, {13.60f, 2.96f, -3.20f}},
-    {{11.20f, 3.12f, -2.08f}, {15.68f, 2.96f, -2.24f}},
-    // Reach the east end of the bar and turn back toward the main dining room and sunlit windows.
-    {{13.12f, 3.20f, -0.80f}, {8.00f, 2.72f, 1.28f}},
-    {{10.56f, 3.20f, -0.16f}, {4.48f, 2.56f, 0.80f}},
-    // Float west down the main dining aisle between the bistro tables and ceiling fans.
-    {{7.68f, 3.20f, -1.60f}, {1.28f, 2.64f, -0.80f}},
-    {{4.48f, 3.20f, -2.72f}, {0.32f, 2.80f, -3.52f}},
-    {{1.92f, 3.20f, -2.24f}, {8.80f, 2.88f, -3.20f}},
-};
-constexpr int kNumInteriorPoints = sizeof(kInteriorKeyframes) / sizeof(kInteriorKeyframes[0]);
 
 constexpr int kSamplesPerSegment = 64;
 
@@ -107,14 +27,129 @@ Vec3 catmullRom(const Vec3& p0, const Vec3& p1, const Vec3& p2, const Vec3& p3, 
     return b1 * ((t2 - u) / (t2 - t1)) + b2 * ((u - t1) / (t2 - t1));
 }
 
-}  // namespace
-
-CameraPath::CameraPath() {
-    buildLoop(loops_[0], kExteriorKeyframes, kNumExteriorPoints, 4.8f, 1.1f);
-    buildLoop(loops_[1], kInteriorKeyframes, kNumInteriorPoints, 1.2f, 0.72f);
+size_t findMatchingBracket(const std::string& s, size_t openPos, char openChar, char closeChar) {
+    int depth = 0;
+    bool inStr = false;
+    for (size_t i = openPos; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '"' && (i == 0 || s[i - 1] != '\\')) inStr = !inStr;
+        if (inStr) continue;
+        if (c == openChar) depth++;
+        else if (c == closeChar) {
+            depth--;
+            if (depth == 0) return i;
+        }
+    }
+    return std::string::npos;
 }
 
-void CameraPath::buildLoop(Loop& loop, const Keyframe* keyframes, int count, float speed, float smoothWindow) {
+std::string extractJsonString(const std::string& obj, const char* key, const char* fallback = "") {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t pos = obj.find(needle);
+    if (pos == std::string::npos) return fallback;
+    pos = obj.find(':', pos + needle.size());
+    if (pos == std::string::npos) return fallback;
+    pos = obj.find('"', pos + 1);
+    if (pos == std::string::npos) return fallback;
+    size_t end = obj.find('"', pos + 1);
+    if (end == std::string::npos) return fallback;
+    return obj.substr(pos + 1, end - pos - 1);
+}
+
+float extractJsonFloat(const std::string& obj, const char* key, float fallback) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t pos = obj.find(needle);
+    if (pos == std::string::npos) return fallback;
+    pos = obj.find(':', pos + needle.size());
+    if (pos == std::string::npos) return fallback;
+    const char* start = obj.c_str() + pos + 1;
+    char* endPtr = nullptr;
+    float v = std::strtof(start, &endPtr);
+    return endPtr != start ? v : fallback;
+}
+
+bool extractJsonBool(const std::string& obj, const char* key, bool fallback) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t pos = obj.find(needle);
+    if (pos == std::string::npos) return fallback;
+    pos = obj.find(':', pos + needle.size());
+    if (pos == std::string::npos) return fallback;
+    while (pos + 1 < obj.size() && std::isspace(static_cast<unsigned char>(obj[pos + 1]))) pos++;
+    if (obj.compare(pos + 1, 4, "true") == 0) return true;
+    if (obj.compare(pos + 1, 5, "false") == 0) return false;
+    return fallback;
+}
+
+std::vector<float> extractAllFloats(const std::string& s) {
+    std::vector<float> out;
+    const char* p = s.c_str();
+    const char* end = p + s.size();
+    while (p < end) {
+        if (*p == '-' || *p == '+' || (*p >= '0' && *p <= '9')) {
+            char* next = nullptr;
+            float v = std::strtof(p, &next);
+            if (next != p) {
+                out.push_back(v);
+                p = next;
+                continue;
+            }
+        }
+        ++p;
+    }
+    return out;
+}
+
+}  // namespace
+
+bool CameraPath::loadFromManifest(const std::string& manifestJson) {
+    loops_.clear();
+    size_t loopsKey = manifestJson.find("\"cameraLoops\"");
+    if (loopsKey == std::string::npos) return false;
+    size_t arrStart = manifestJson.find('[', loopsKey);
+    if (arrStart == std::string::npos) return false;
+    size_t arrEnd = findMatchingBracket(manifestJson, arrStart, '[', ']');
+    if (arrEnd == std::string::npos) return false;
+
+    size_t cur = arrStart + 1;
+    while (cur < arrEnd) {
+        size_t objStart = manifestJson.find('{', cur);
+        if (objStart == std::string::npos || objStart >= arrEnd) break;
+        size_t objEnd = findMatchingBracket(manifestJson, objStart, '{', '}');
+        if (objEnd == std::string::npos || objEnd > arrEnd) break;
+        std::string obj = manifestJson.substr(objStart, objEnd - objStart + 1);
+
+        std::string name = extractJsonString(obj, "name", "Fly-through");
+        float speed = extractJsonFloat(obj, "speed", 2.4f);
+        float smoothWindow = extractJsonFloat(obj, "smoothWindow", 1.0f);
+        bool indoor = extractJsonBool(obj, "indoor", false);
+
+        size_t kfKey = obj.find("\"keyframes\"");
+        if (kfKey != std::string::npos) {
+            size_t kfStart = obj.find('[', kfKey);
+            size_t kfEnd = kfStart != std::string::npos ? findMatchingBracket(obj, kfStart, '[', ']') : std::string::npos;
+            if (kfStart != std::string::npos && kfEnd != std::string::npos) {
+                std::vector<float> nums = extractAllFloats(obj.substr(kfStart, kfEnd - kfStart + 1));
+                std::vector<Keyframe> kfs;
+                for (size_t i = 0; i + 5 < nums.size(); i += 6) {
+                    kfs.push_back({Vec3{nums[i], nums[i + 1], nums[i + 2]},
+                                   Vec3{nums[i + 3], nums[i + 4], nums[i + 5]}});
+                }
+                if (kfs.size() >= 2) {
+                    Loop loop;
+                    loop.name = name;
+                    loop.indoor = indoor;
+                    buildLoop(loop, kfs, speed, smoothWindow);
+                    loops_.push_back(std::move(loop));
+                }
+            }
+        }
+        cur = objEnd + 1;
+    }
+    return !loops_.empty();
+}
+
+void CameraPath::buildLoop(Loop& loop, const std::vector<Keyframe>& keyframes, float speed, float smoothWindow) {
+    const int count = static_cast<int>(keyframes.size());
     loop.speed = speed;
     loop.smoothWindow = smoothWindow;
     loop.points.resize(count);
@@ -205,6 +240,7 @@ CameraPath::Pose CameraPath::evaluateLoop(const Loop& loop, double t, int segmen
     Pose pose;
     pose.eye = positionAtDistance(loop, s);
     pose.segment = segment;
+    pose.indoor = loop.indoor;
     Vec3 target{0, 0, 0};
     float wsum = 0.0f;
     for (int k = -2; k <= 2; ++k) {
@@ -216,12 +252,50 @@ CameraPath::Pose CameraPath::evaluateLoop(const Loop& loop, double t, int segmen
     return pose;
 }
 
+float CameraPath::totalLength() const {
+    float sum = 0.0f;
+    for (const auto& l : loops_) sum += l.totalLength;
+    return sum;
+}
+
+float CameraPath::loopDuration() const {
+    float sum = 0.0f;
+    for (const auto& l : loops_) sum += l.totalTime;
+    return sum;
+}
+
+float CameraPath::segmentDuration(int segment) const {
+    if (segment < 0 || segment >= static_cast<int>(loops_.size())) return 0.0f;
+    return loops_[segment].totalTime;
+}
+
+float CameraPath::segmentStartTime(int segment) const {
+    float sum = 0.0f;
+    for (int i = 0; i < segment && i < static_cast<int>(loops_.size()); ++i) {
+        sum += loops_[i].totalTime;
+    }
+    return sum;
+}
+
+const std::string& CameraPath::loopName(int segment) const {
+    static const std::string kEmpty;
+    if (segment < 0 || segment >= static_cast<int>(loops_.size())) return kEmpty;
+    return loops_[segment].name;
+}
+
 CameraPath::Pose CameraPath::evaluate(double timeSeconds) const {
-    double total = static_cast<double>(loops_[0].totalTime + loops_[1].totalTime);
+    if (loops_.empty()) return Pose{};
+    double total = static_cast<double>(loopDuration());
+    if (total <= 0.0) return Pose{};
     double t = std::fmod(timeSeconds, total);
     if (t < 0) t += total;
-    if (t < static_cast<double>(loops_[0].totalTime)) {
-        return evaluateLoop(loops_[0], t, 0);
+    double accum = 0.0;
+    for (size_t i = 0; i < loops_.size(); ++i) {
+        double dur = static_cast<double>(loops_[i].totalTime);
+        if (t < accum + dur || i + 1 == loops_.size()) {
+            return evaluateLoop(loops_[i], t - accum, static_cast<int>(i));
+        }
+        accum += dur;
     }
-    return evaluateLoop(loops_[1], t - static_cast<double>(loops_[0].totalTime), 1);
+    return evaluateLoop(loops_.back(), 0.0, static_cast<int>(loops_.size() - 1));
 }

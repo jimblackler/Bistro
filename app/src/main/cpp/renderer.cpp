@@ -139,6 +139,7 @@ Vec3 envToWorld(const Vec3& e, float yaw) {
 // ------------------------------------------------------------------------------------------------
 
 bool Renderer::init(AAssetManager* assets) {
+    assets_ = assets;
     renderScale_ = std::clamp(debugProperty("debug.bistro.scale", renderScale_), 0.25f, 1.0f);
     occlusionCulling_ = debugProperty("debug.bistro.occlusion", 1.0f) > 0.5f;
     buildHiz_ = debugProperty("debug.bistro.hiz", 1.0f) > 0.5f;
@@ -151,11 +152,46 @@ bool Renderer::init(AAssetManager* assets) {
         initFailed_ = true;
         return false;
     }
-    scene_.begin(&ctx_, assets);
     initialized_ = true;
-    LOGI("Renderer initialised; camera loops: exterior %.1f s + interior %.1f s (%.0f m total)",
-         path_.exteriorDuration(), path_.interiorDuration(), path_.totalLength());
+    LOGI("Renderer initialised");
     return true;
+}
+
+void Renderer::setEnvironment(const std::string& assetDir) {
+    if (!initialized_) return;
+    if (assetDir == currentAssetDir_ && !scene_.failed() && !initFailed_) {
+        lastCameraSegment_ = -1;
+        invalidateHistory();
+        return;
+    }
+    vkDeviceWaitIdle(ctx_.device);
+    scene_.destroy();
+    ctx_.destroyImage(shadowMap_);
+    ctx_.destroyBuffer(shadowDraws_);
+    for (auto& f : frames_) {
+        ctx_.destroyBuffer(f.draws);
+    }
+    shadowReady_ = false;
+    shadowOpaqueCount_ = 0;
+    shadowMaskCount_ = 0;
+    pointLights_.clear();
+    lastCameraSegment_ = -1;
+    invalidateHistory();
+    initFailed_ = false;
+    stats_ = RenderStats{};
+    stats_.renderWidth = renderExtent_.width;
+    stats_.renderHeight = renderExtent_.height;
+    currentAssetDir_ = assetDir;
+    if (exposureBuffer_.mapped) {
+        float initExp[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+        memcpy(exposureBuffer_.mapped, initExp, sizeof(initExp));
+    }
+    if (!assetDir.empty()) {
+        scene_.begin(&ctx_, assets_, assetDir);
+        path_.loadFromManifest(scene_.manifestJson);
+        LOGI("Switched environment to %s (%d camera loops, %.1f s total, %.0f m)",
+             assetDir.c_str(), path_.loopCount(), path_.loopDuration(), path_.totalLength());
+    }
 }
 
 bool Renderer::createDescriptorLayouts() {
@@ -468,8 +504,17 @@ VkPipeline Renderer::createGraphicsPipeline(const uint32_t* vs, size_t vsSize, c
     rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs.lineWidth = 1.0f;
     rs.depthBiasEnable = depthBias;
-    rs.depthBiasConstantFactor = 2.0f;
-    rs.depthBiasSlopeFactor = 2.5f;
+    const float biasSign = (depthCompare == VK_COMPARE_OP_GREATER_OR_EQUAL || depthCompare == VK_COMPARE_OP_GREATER) ? 1.0f : 1.0f;
+    if (depthCompare == VK_COMPARE_OP_GREATER_OR_EQUAL || depthCompare == VK_COMPARE_OP_GREATER) {
+        // Reversed-Z (near = 1, far = 0): nudge alpha-masked decals slightly towards the camera so coplanar
+        // warning labels and stencil decals never Z-fight with the underlying opaque hull.
+        rs.depthBiasConstantFactor = 2.0f;
+        rs.depthBiasSlopeFactor = 1.5f;
+    } else {
+        rs.depthBiasConstantFactor = 2.0f;
+        rs.depthBiasSlopeFactor = 2.5f;
+    }
+    (void)biasSign;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = samples;
     ms.alphaToCoverageEnable = alphaToCoverage;
@@ -558,7 +603,7 @@ bool Renderer::createPipelines() {
                                            VK_CULL_MODE_NONE, true, true, reversedZ, kBlendNone,
                                            msaaSamples_ != VK_SAMPLE_COUNT_1_BIT &&
                                                debugProperty("debug.bistro.a2c", 1.0f) > 0.5f,
-                                           1, false, "Scene Alpha Mask");
+                                           1, true, "Scene Alpha Mask");
     blendPipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), kSceneFrag, sizeof(kSceneFrag),
                                             pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
                                             VK_CULL_MODE_NONE, true, false, reversedZ, kBlendPremultiplied, false, 2,
@@ -999,18 +1044,19 @@ bool Renderer::buildShadowMap() {
     // Lighting set-up. The sun direction comes from the HDR environment map (so shadows match the sky);
     // the map is rotated so the sun's azimuth matches the directional light authored in the FBX.
     const EnvironmentInfo& env = scene_.environment;
+    const RenderConfig& rc = scene_.renderConfig;
     Vec3 fbxSun{scene_.header.sunDirection[0], scene_.header.sunDirection[1], scene_.header.sunDirection[2]};
     float targetAzimuth = std::atan2(fbxSun.z, fbxSun.x);
     float envAzimuth = std::atan2(env.sunDirection.z, env.sunDirection.x);
-    constexpr float kAzimuthOffset = -0.35f;  // artistic tweak: rake light along the main street
-    envYaw_ = targetAzimuth - envAzimuth + kAzimuthOffset;
+    envYaw_ = targetAzimuth - envAzimuth + rc.sunAzimuthOffset;
     sunDirection_ = normalize(envToWorld(env.sunDirection, envYaw_));
-    sunColor_ = env.sunIrradiance * 2.2f;
+    sunColor_ = env.sunIrradiance * rc.sunIntensityScale;
+    pointLights_.clear();
     for (const auto& pl : scene_.pointLights) {
         if (pointLights_.size() / 2 >= kMaxPointLights) break;
         pointLights_.push_back(Vec4{pl.position[0], pl.position[1], pl.position[2], pl.range});
-        constexpr float kLightScale = 0.030f;
-        pointLights_.push_back(Vec4{pl.color[0] * kLightScale, pl.color[1] * kLightScale, pl.color[2] * kLightScale, 0});
+        float lightScale = rc.pointLightScale;
+        pointLights_.push_back(Vec4{pl.color[0] * lightScale, pl.color[1] * lightScale, pl.color[2] * lightScale, 0});
     }
     LOGI("Sun direction (%.3f %.3f %.3f), env yaw %.2f rad", sunDirection_.x, sunDirection_.y, sunDirection_.z,
          envYaw_);
@@ -1123,14 +1169,16 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
         pose.eye = cameraOverride_.eye;
         pose.target = cameraOverride_.target;
     } else if (pose.segment != lastCameraSegment_) {
+        const std::string& segName = path_.loopName(pose.segment);
         if (lastCameraSegment_ >= 0) {
-            LOGI("Switching camera to %s fly-through", pose.segment == 0 ? "Exterior" : "Restaurant Interior");
+            LOGI("Switching camera to %s fly-through", segName.c_str());
         }
         lastCameraSegment_ = pose.segment;
         invalidateHistory();
     }
     stats_.cameraPos = pose.eye;
     stats_.cameraSegment = pose.segment;
+    stats_.cameraSegmentName = path_.loopName(pose.segment);
     float aspect = static_cast<float>(logicalExtent_.width) / static_cast<float>(logicalExtent_.height);
     Mat4 view = Mat4::lookAt(pose.eye, pose.target, Vec3{0, 1, 0});
     Mat4 proj = Mat4::perspectiveReversedInfinite(kFovY, aspect, kNearPlane);
@@ -1191,19 +1239,26 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
         for (int c = 0; c < 3; ++c) u.sh[i][c] = scene_.environment.sh[i][c];
     extractFrustumPlanes(viewProj, u.frustumPlanes);
 
-    // Fog colour: average sky radiance (SH band 0) tinted slightly warm by the sun.
+    const RenderConfig& rc = scene_.renderConfig;
+    // Fog colour: configured override, or average sky radiance (SH band 0) tinted slightly warm by the sun.
     float avg[3];
     for (int c = 0; c < 3; ++c) avg[c] = scene_.environment.sh[0][c] * 0.282095f / 3.14159265f;
-    u.fogParams[0] = 0.0045f;  // density per metre
-    u.fogParams[1] = 0.08f;    // height falloff
-    u.fogParams[2] = 0.0f;     // base height
-    u.fogParams[3] = 0.6f;     // max opacity
-    u.fogColor[0] = avg[0] * 1.05f;
-    u.fogColor[1] = avg[1] * 1.0f;
-    u.fogColor[2] = avg[2] * 0.95f;
+    u.fogParams[0] = rc.fogDensity;        // density per metre
+    u.fogParams[1] = rc.fogHeightFalloff;  // height falloff
+    u.fogParams[2] = rc.fogBaseHeight;     // base height
+    u.fogParams[3] = rc.fogMaxOpacity;     // max opacity
+    if (rc.fogColor.x > 0.0f || rc.fogColor.y > 0.0f || rc.fogColor.z > 0.0f) {
+        u.fogColor[0] = rc.fogColor.x;
+        u.fogColor[1] = rc.fogColor.y;
+        u.fogColor[2] = rc.fogColor.z;
+    } else {
+        u.fogColor[0] = avg[0] * 1.05f;
+        u.fogColor[1] = avg[1] * 1.0f;
+        u.fogColor[2] = avg[2] * 0.95f;
+    }
 
-    u.renderParams[0] = 1.0f;   // manual exposure multiplier (on top of auto exposure)
-    u.renderParams[1] = 0.06f;  // bloom strength
+    u.renderParams[0] = 1.0f;              // manual exposure multiplier (on top of auto exposure)
+    u.renderParams[1] = rc.bloomStrength;  // bloom strength
     u.renderParams[2] = static_cast<float>(renderExtent_.width);
     u.renderParams[3] = static_cast<float>(renderExtent_.height);
     u.cullParams[0] = static_cast<float>(scene_.clusters.size());
@@ -1213,7 +1268,7 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
     u.postParams[0] = static_cast<float>(preRotation_);
     u.postParams[1] = static_cast<float>(swapchainExtent_.width);
     u.postParams[2] = static_cast<float>(swapchainExtent_.height);
-    u.postParams[3] = 4.0f;  // emissive intensity
+    u.postParams[3] = rc.emissiveIntensity;  // emissive intensity
     u.shadowParams[0] = 1.0f / static_cast<float>(shadowSize_);
     u.shadowParams[1] = shadowWorldTexel_ * 1.5f;
     u.shadowParams[2] = 0.00002f;
@@ -1223,11 +1278,12 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
     u.extraParams[2] = 1.08f;  // saturation
     u.extraParams[3] = 1.04f;  // contrast
     u.exposureParams[0] = static_cast<float>(dt);
-    u.exposureParams[1] = 0.16f;  // key value
-    u.exposureParams[2] = 0.15f;
-    u.exposureParams[3] = 3.0f;
+    u.exposureParams[1] = rc.exposureKey;  // key value
+    u.exposureParams[2] = rc.minExposure;
+    u.exposureParams[3] = rc.maxExposure;
     u.exposureParams2[0] = 1.2f;  // adaptation speed
     u.exposureParams2[1] = 1.0f;  // auto exposure on
+    u.exposureParams2[2] = pose.indoor ? 1.0f : 0.0f;
     u.occlusionParams[0] = static_cast<float>(hizExtent_.width);
     u.occlusionParams[1] = static_cast<float>(hizExtent_.height);
     u.occlusionParams[2] = static_cast<float>(hizMipCount_);
@@ -1312,7 +1368,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline_);
-        vkCmdDispatch(cmd, (capacity + 63) / 64, 1, 1);
+        vkCmdDispatch(cmd, 1, 1, 1);
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                       VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
     }
@@ -1603,12 +1659,14 @@ void Renderer::drawFrame(double timeSeconds, double dtSeconds) {
     if (!initialized_ || !swapchain_) return;
 
     // Asset streaming happens between loading-screen frames.
-    if (!scene_.loaded() && !scene_.failed()) {
-        scene_.loadStep();
-    } else if (scene_.loaded() && !shadowReady_) {
-        if (!buildShadowMap()) {
-            initFailed_ = true;
-            return;
+    if (!currentAssetDir_.empty()) {
+        if (!scene_.loaded() && !scene_.failed()) {
+            scene_.loadStep();
+        } else if (scene_.loaded() && !shadowReady_) {
+            if (!buildShadowMap()) {
+                initFailed_ = true;
+                return;
+            }
         }
     }
     if (swapchainDirty_) {

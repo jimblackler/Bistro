@@ -57,12 +57,28 @@ std::string RenderThread::status() {
     return status_;
 }
 
+bool RenderThread::isFlybyCompleted() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return flybyCompleted_;
+}
+
+void RenderThread::setEnvironment(const std::string& assetDir, bool startFlyby) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pendingAssetDir_ = assetDir;
+    pendingStartFlyby_ = startFlyby;
+    envPending_ = true;
+    flybyCompleted_ = false;
+    cv_.notify_all();
+}
+
 void RenderThread::setDebugOptions(double startTime, bool freeze, const CameraOverride& override) {
     std::lock_guard<std::mutex> lock(mutex_);
     startTime_ = startTime;
     freeze_ = freeze;
     override_ = override;
+    flybyCompleted_ = false;
     debugDirty_ = true;
+    cv_.notify_all();
 }
 
 void RenderThread::run() {
@@ -79,6 +95,7 @@ void RenderThread::run() {
     double wallTime = 0.0;
     double animTime = 0.0;
     bool freeze = false;
+    bool flybyRunning = false;
 
     while (true) {
         {
@@ -98,9 +115,23 @@ void RenderThread::run() {
                     }
                     cv_.notify_all();
                 }
+                if (envPending_) {
+                    std::string dir = pendingAssetDir_;
+                    bool startFlyby = pendingStartFlyby_;
+                    envPending_ = false;
+                    lock.unlock();
+                    if (ok) renderer.setEnvironment(dir);
+                    lock.lock();
+                    animTime = 0.0;
+                    flybyRunning = startFlyby;
+                    flybyCompleted_ = false;
+                    last = Clock::now();
+                }
                 if (debugDirty_) {
                     animTime = startTime_;
                     freeze = freeze_;
+                    flybyRunning = true;
+                    flybyCompleted_ = false;
                     renderer.setCameraOverride(override_);
                     debugDirty_ = false;
                 }
@@ -116,19 +147,29 @@ void RenderThread::run() {
         last = now;
         dt = std::min(dt, 0.1);
         wallTime += dt;
-        if (renderer.isLoaded() && !freeze) animTime += dt;
+        if (renderer.isLoaded() && flybyRunning && !freeze) {
+            animTime += dt;
+            float totalLoop = renderer.loopDuration();
+            if (!override_.enabled && totalLoop > 0.0f && animTime >= static_cast<double>(totalLoop)) {
+                flybyRunning = false;
+                std::lock_guard<std::mutex> lock(mutex_);
+                flybyCompleted_ = true;
+            }
+        }
 
         renderer.drawFrame(renderer.isLoaded() ? animTime : wallTime, dt);
 
         char buf[256];
-        if (renderer.loadFailed()) {
+        if (!renderer.hasEnvironment()) {
+            snprintf(buf, sizeof(buf), "Select an environment to begin");
+        } else if (renderer.loadFailed()) {
             snprintf(buf, sizeof(buf), "Error: %s", renderer.loadStatus().c_str());
         } else if (!renderer.isLoaded()) {
             snprintf(buf, sizeof(buf), "%s… %d%%", renderer.loadStatus().c_str(),
                      static_cast<int>(renderer.loadProgress() * 100.0f));
         } else {
             const RenderStats& s = renderer.stats();
-            const char* tour = s.cameraSegment == 0 ? "Exterior" : "Interior";
+            const char* tour = s.cameraSegmentName.empty() ? "Fly-Through" : s.cameraSegmentName.c_str();
             snprintf(buf, sizeof(buf),
                      "%s · %.0f fps · GPU %.1f ms · %u×%u %s\n%u/%u clusters · %.2fM of %.1fM triangles drawn",
                      tour, s.fps, s.gpuMs, s.renderWidth, s.renderHeight, s.taa ? "TAA" : "4×MSAA",

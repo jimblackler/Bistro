@@ -42,6 +42,22 @@ struct EnvironmentInfo {
     float sh[9][3] = {};
 };
 
+struct RenderConfig {
+    float emissiveIntensity = 4.0f;
+    float bloomStrength = 0.06f;
+    float exposureKey = 0.16f;
+    float minExposure = 0.15f;
+    float maxExposure = 3.0f;
+    float fogDensity = 0.0045f;
+    float fogHeightFalloff = 0.08f;
+    float fogBaseHeight = 0.0f;
+    float fogMaxOpacity = 0.60f;
+    Vec3 fogColor{0.0f, 0.0f, 0.0f};
+    float sunAzimuthOffset = -0.35f;
+    float sunIntensityScale = 2.2f;
+    float pointLightScale = 0.030f;
+};
+
 constexpr uint32_t kBucketOpaque = 0;
 constexpr uint32_t kBucketMask = 1;
 constexpr uint32_t kBucketBlend = 2;
@@ -49,13 +65,14 @@ constexpr uint32_t kBucketCount = 3;
 
 class Scene {
 public:
-    void begin(VulkanContext* ctx, AAssetManager* assets);
+    void begin(VulkanContext* ctx, AAssetManager* assets, const std::string& assetDir);
     // Performs a slice of the loading work. Returns true once everything is resident on the GPU.
     bool loadStep();
     [[nodiscard]] float progress() const;
     [[nodiscard]] const std::string& status() const { return status_; }
     [[nodiscard]] bool loaded() const { return stage_ == Stage::Done; }
     [[nodiscard]] bool failed() const { return failed_; }
+    [[nodiscard]] const std::string& assetDir() const { return assetDir_; }
     void destroy();
 
     GpuBuffer vertexBuffer;
@@ -66,6 +83,8 @@ public:
     GpuImage sky;
     GpuImage envSpecular;
     EnvironmentInfo environment;
+    RenderConfig renderConfig;
+    std::string manifestJson;
 
     std::vector<GpuCluster> clusters;
     std::vector<bistro::MaterialRecord> materials;
@@ -77,6 +96,7 @@ public:
 private:
     enum class Stage { Geometry, Textures, Environment, Done };
 
+    bool loadManifest();
     bool loadGeometry();
     bool loadTexture(const std::string& path, GpuImage& out, const char* debugName);
     bool createFallbackTextures();
@@ -84,6 +104,7 @@ private:
 
     VulkanContext* ctx_ = nullptr;
     AAssetManager* assets_ = nullptr;
+    std::string assetDir_;
     Stage stage_ = Stage::Geometry;
     std::vector<bistro::TextureRecord> textureRecords_;
     size_t nextTexture_ = 0;

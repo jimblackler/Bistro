@@ -32,13 +32,15 @@ struct RenderStats {
     uint32_t renderHeight = 0;
     float exposure = 1.0f;
     Vec3 cameraPos;
-    int cameraSegment = 0;  // 0 = Exterior, 1 = Restaurant Interior
+    int cameraSegment = 0;
+    std::string cameraSegmentName;
 };
 
-// Owns all Vulkan state and renders the Bistro fly-through. Must only be used from the render thread.
+// Owns all Vulkan state and renders the active environment fly-through. Must only be used from the render thread.
 class Renderer {
 public:
     bool init(AAssetManager* assets);
+    void setEnvironment(const std::string& assetDir);
     bool attachWindow(ANativeWindow* window);
     void detachWindow();
     // Renders one frame (the loading screen until all assets are resident).
@@ -46,11 +48,14 @@ public:
     void destroy();
 
     [[nodiscard]] bool hasWindow() const { return swapchain_ != VK_NULL_HANDLE; }
-    [[nodiscard]] bool isLoaded() const { return scene_.loaded() && shadowReady_; }
-    [[nodiscard]] float loadProgress() const { return scene_.progress(); }
+    [[nodiscard]] bool hasEnvironment() const { return !currentAssetDir_.empty(); }
+    [[nodiscard]] const std::string& currentAssetDir() const { return currentAssetDir_; }
+    [[nodiscard]] bool isLoaded() const { return !currentAssetDir_.empty() && scene_.loaded() && shadowReady_; }
+    [[nodiscard]] float loadProgress() const { return currentAssetDir_.empty() ? 0.0f : scene_.progress(); }
     [[nodiscard]] const std::string& loadStatus() const { return scene_.status(); }
     [[nodiscard]] bool loadFailed() const { return scene_.failed() || initFailed_; }
     [[nodiscard]] const RenderStats& stats() const { return stats_; }
+    [[nodiscard]] float loopDuration() const { return path_.loopDuration(); }
     void setCameraOverride(const CameraOverride& o) {
         cameraOverride_ = o;
         invalidateHistory();  // camera may have jumped; last frame's data is no longer valid
@@ -102,6 +107,8 @@ private:
     void readBackStats(FrameResources& frame, uint32_t frameIndex);
 
     VulkanContext ctx_;
+    AAssetManager* assets_ = nullptr;
+    std::string currentAssetDir_;
     Scene scene_;
     CameraPath path_;
     CameraOverride cameraOverride_;

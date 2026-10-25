@@ -5,7 +5,7 @@
 // GPU-driven visibility: frustum + small-feature culling of every cluster, compacting the survivors
 // into per-bucket indirect draw lists consumed by vkCmdDrawIndexedIndirectCount.
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 256) in;
 
 struct DrawCommand {
     uint indexCount;
@@ -15,7 +15,7 @@ struct DrawCommand {
     uint firstInstance;
 };
 
-layout(set = 0, binding = 3, std430) writeonly buffer DrawBuffer { DrawCommand draws[]; };
+layout(set = 0, binding = 3, std430) buffer DrawBuffer { DrawCommand draws[]; };
 layout(set = 0, binding = 4, std430) buffer CountBuffer { uint counts[]; };
 
 // Tests the box against the previous frame's Hi-Z pyramid (reprojected with the previous frame's
@@ -48,30 +48,70 @@ bool occludedByHiZ(vec3 mn, vec3 mx) {
     return nearest < farthest;
 }
 
-void main() {
-    uint id = gl_GlobalInvocationID.x;
-    uint clusterCount = uint(frame.cullParams.x);
-    if (id >= clusterCount) return;
-
-    Cluster c = clusters[id];
+bool isClusterVisible(Cluster c) {
     vec3 center = (c.aabbMin + c.aabbMax) * 0.5;
     vec3 extent = (c.aabbMax - c.aabbMin) * 0.5;
 
     for (int i = 0; i < 6; ++i) {
         vec4 plane = frame.frustumPlanes[i];
         float r = dot(extent, abs(plane.xyz));
-        if (dot(plane.xyz, center) + plane.w < -r) return;
+        if (dot(plane.xyz, center) + plane.w < -r) return false;
     }
 
     // Skip clusters whose bounding sphere projects to less than a pixel or so.
     float radius = length(extent);
     float dist = distance(center, frame.cameraPos.xyz) - radius;
-    if (dist > 0.0 && (radius / dist) * frame.cullParams.z < frame.cullParams.w) return;
+    if (dist > 0.0 && (radius / dist) * frame.cullParams.z < frame.cullParams.w) return false;
 
-    if (occludedByHiZ(c.aabbMin, c.aabbMax)) return;
-
-    uint capacity = uint(frame.cullParams.y);
-    uint slot = atomicAdd(counts[c.bucket], 1u);
-    atomicAdd(counts[3], c.indexCount / 3u);  // visible triangle statistics
-    draws[c.bucket * capacity + slot] = DrawCommand(c.indexCount, 1u, c.firstIndex, c.vertexOffset, id);
+    if (occludedByHiZ(c.aabbMin, c.aabbMax)) return false;
+    return true;
 }
+
+shared uint sBucketTotals[3][256];
+shared uint sBucketPrefix[3][256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint clusterCount = uint(frame.cullParams.x);
+    uint capacity = uint(frame.cullParams.y);
+
+    // Each of the 256 threads processes a contiguous chunk of clusters in deterministic index order.
+    uint chunk = (clusterCount + 255u) / 256u;
+    uint start = min(tid * chunk, clusterCount);
+    uint end = min(start + chunk, clusterCount);
+
+    uint bCount[3] = uint[3](0u, 0u, 0u);
+    uint triSum = 0u;
+    for (uint id = start; id < end; ++id) {
+        Cluster c = clusters[id];
+        if (isClusterVisible(c)) {
+            bCount[c.bucket]++;
+            triSum += c.indexCount / 3u;
+        }
+    }
+    for (int b = 0; b < 3; ++b) sBucketTotals[b][tid] = bCount[b];
+    if (triSum > 0u) atomicAdd(counts[3], triSum);
+    barrier();
+
+    if (tid == 0u) {
+        for (int b = 0; b < 3; ++b) {
+            uint sum = 0u;
+            for (uint i = 0u; i < 256u; ++i) {
+                sBucketPrefix[b][i] = sum;
+                sum += sBucketTotals[b][i];
+            }
+            counts[b] = sum;
+        }
+    }
+    barrier();
+
+    uint offset[3] = uint[3](sBucketPrefix[0][tid], sBucketPrefix[1][tid], sBucketPrefix[2][tid]);
+    for (uint id = start; id < end; ++id) {
+        Cluster c = clusters[id];
+        if (isClusterVisible(c)) {
+            uint slot = offset[c.bucket]++;
+            draws[c.bucket * capacity + slot] = DrawCommand(c.indexCount, 1u, c.firstIndex, c.vertexOffset, id);
+        }
+    }
+}
+

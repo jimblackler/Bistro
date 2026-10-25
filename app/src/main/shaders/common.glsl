@@ -57,7 +57,7 @@ layout(set = 0, binding = 0, std140) uniform FrameUniforms {
     vec4 shadowParams;    // x = texel size (uv), y = normal bias (m), z = depth bias, w = filter radius (texels)
     vec4 extraParams;     // x = sRGB output needs manual encode, y = vignette, z = saturation, w = contrast
     vec4 exposureParams;  // x = frame dt (s), y = key (target mid grey), z = min exposure, w = max exposure
-    vec4 exposureParams2; // x = adaptation speed (1/s), y = auto exposure enabled, z/w unused
+    vec4 exposureParams2; // x = adaptation speed (1/s), y = auto exposure enabled, z = camera indoors, w unused
     vec4 occlusionParams; // x = Hi-Z width, y = Hi-Z height, z = Hi-Z mip count, w = occlusion culling enabled
     vec4 taaParams;       // xy = projection jitter (NDC), z = history feedback, w = history valid
     PointLight lights[MAX_POINT_LIGHTS];

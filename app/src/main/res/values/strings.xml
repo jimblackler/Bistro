@@ -1,6 +1,17 @@
 <resources>
-    <string name="app_name">Bistro Fly-Through</string>
+    <string name="app_name">Vulkan ORCA Showcase</string>
     <string name="status_starting">Starting…</string>
-    <string name="surface_description">Vulkan rendering of the Amazon Lumberyard Bistro scene. Tap to toggle the overlay.</string>
-    <string name="attribution">Amazon Lumberyard Bistro · NVIDIA ORCA · CC BY 4.0</string>
+    <string name="surface_description">Vulkan 3D environment renderer. Tap to toggle the overlay.</string>
+    <string name="attribution">NVIDIA ORCA · CC BY 4.0</string>
+    <string name="start_screen_title">Select 3D Environment</string>
+    <string name="start_screen_subtitle">Real-Time Mobile Vulkan 1.3 Fly-Through</string>
+    <string name="start_screen_subtitle_paged">%1$s  ·  %2$d–%3$d of %4$d</string>
+    <string name="back_to_environments">Environments</string>
+    <string name="countdown_banner">Starting %1$s in %2$ds… (Tap any environment to start now)</string>
+    <string name="badge_auto_start">Auto-start in %1$ds</string>
+    <string name="badge_tap_to_start">Tap to start</string>
+    <string name="prev_environment">‹</string>
+    <string name="next_environment">›</string>
+    <string name="prev_environment_desc">Previous environments</string>
+    <string name="next_environment_desc">Next environments</string>
 </resources>

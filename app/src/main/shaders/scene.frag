@@ -174,17 +174,23 @@ void main() {
     vec3 bounce = frame.sunColor.rgb * 0.035 * (0.6 + 0.4 * skyVis);
     color += diffuseColor * (irradiance * diffuseOcclusion + bounce * ao) * (1.0 / PI);
 
+    bool isOpaqueGlass = (ALPHA_MODE == 0u) && ((m.flags & 4u) == 0u) &&
+                         (m.roughnessFactor > 0.07 && m.roughnessFactor < 0.09) &&
+                         (m.metallicFactor < 0.01) &&
+                         (m.baseColorFactor.r > 0.20 && m.baseColorFactor.r < 0.25);
+    bool isGlassSurface = (ALPHA_MODE == 2u) || isOpaqueGlass;
+
     vec3 R = reflect(-V, N);
     float specOcclusion = clamp(pow(NdotV + diffuseOcclusion, exp2(-16.0 * roughness - 1.0)) - 1.0 + diffuseOcclusion,
                                 0.0, 1.0);
-    if (roughness < 0.15 && metallic < 0.1) {
+    if (isGlassSurface && roughness < 0.15 && metallic < 0.1) {
         // Keep glossy dielectric glass (frosted doors/transoms) reflective even when recessed in door frames.
         specOcclusion = max(specOcclusion, 0.75);
     }
     vec3 Rglass = normalize(vec3(R.x, clamp(R.y * 0.65 + 0.26, 0.05, 0.90), R.z));
     vec3 envSpec = sampleEnvSpecular(R, roughness) * frame.envRotation.w;
     vec3 canyonSpec = envSpec;
-    if (roughness < 0.15 && metallic < 0.1) {
+    if (isGlassSurface && roughness < 0.15 && metallic < 0.1) {
         canyonSpec = sampleEnvSpecular(Rglass, roughness) * frame.envRotation.w;
         envSpec = mix(envSpec, canyonSpec, 0.85);
     }
@@ -201,8 +207,7 @@ void main() {
     float heightTerm = exp(-max(inWorldPos.y - frame.fogParams.z, 0.0) * frame.fogParams.y);
     float fog = min(1.0 - exp(-dist * frame.fogParams.x * heightTerm), frame.fogParams.w);
 
-    bool isOpaqueGlass = (ALPHA_MODE == 0u && roughness < 0.10 && metallic < 0.10);
-    if (ALPHA_MODE == 2u || isOpaqueGlass) {
+    if (isGlassSurface) {
         // Glass: premultiplied alpha. Separate curved 3D glassware/bottles (where geometric normals vary
         // across triangles) from flat architectural window panes so each gets tailored reflection tuning.
         bool isGlassware = !isOpaqueGlass &&
@@ -211,9 +216,7 @@ void main() {
         float alpha = isOpaqueGlass
             ? 1.0
             : (isGlassware ? clamp(base.a, 0.08, 0.14) : max(clamp(base.a, 0.0, 1.0), 0.14));
-        bool cameraIndoors = (frame.cameraPos.x > -0.2 && frame.cameraPos.x < 19.5 &&
-                              frame.cameraPos.z > -18.0 && frame.cameraPos.z < 6.0 &&
-                              frame.cameraPos.y < 4.5);
+        bool cameraIndoors = frame.exposureParams2.z > 0.5;
 
         float cLum = max(luminance(canyonSpec), 1e-4);
         float pLum = pow(cLum, 0.45);

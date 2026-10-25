@@ -3,6 +3,7 @@
 #include <android/log.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 #include "vulkan_debug.h"
@@ -68,13 +69,76 @@ void transitionForUpload(VulkanContext* ctx, const std::vector<GpuImage*>& image
     ctx->endOneShot(cmd);
 }
 
+float parseJsonFloat(const std::string& json, const char* key, float fallback) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t pos = json.find(needle);
+    if (pos == std::string::npos) return fallback;
+    pos = json.find(':', pos + needle.size());
+    if (pos == std::string::npos) return fallback;
+    const char* start = json.c_str() + pos + 1;
+    char* end = nullptr;
+    float v = std::strtof(start, &end);
+    return end != start ? v : fallback;
+}
+
+Vec3 parseJsonVec3(const std::string& json, const char* key, Vec3 fallback) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t pos = json.find(needle);
+    if (pos == std::string::npos) return fallback;
+    pos = json.find('[', pos + needle.size());
+    if (pos == std::string::npos) return fallback;
+    const char* p = json.c_str() + pos + 1;
+    char* next = nullptr;
+    float x = std::strtof(p, &next);
+    if (next == p) return fallback;
+    while (*next && (*next == ',' || *next == ' ')) next++;
+    p = next;
+    float y = std::strtof(p, &next);
+    if (next == p) return fallback;
+    while (*next && (*next == ',' || *next == ' ')) next++;
+    p = next;
+    float z = std::strtof(p, &next);
+    if (next == p) return fallback;
+    return Vec3{x, y, z};
+}
+
 }  // namespace
 
-void Scene::begin(VulkanContext* ctx, AAssetManager* assets) {
+void Scene::begin(VulkanContext* ctx, AAssetManager* assets, const std::string& assetDir) {
     ctx_ = ctx;
     assets_ = assets;
+    assetDir_ = assetDir;
     stage_ = Stage::Geometry;
+    nextTexture_ = 0;
+    failed_ = false;
     status_ = "Loading geometry";
+    loadManifest();
+}
+
+bool Scene::loadManifest() {
+    renderConfig = RenderConfig{};
+    manifestJson.clear();
+    AssetFile file(assets_, assetDir_ + "/manifest.json");
+    if (!file.valid()) return false;
+    manifestJson.assign(reinterpret_cast<const char*>(file.data()), file.size());
+    size_t rcPos = manifestJson.find("\"renderConfig\"");
+    if (rcPos != std::string::npos) {
+        std::string sub = manifestJson.substr(rcPos);
+        renderConfig.emissiveIntensity = parseJsonFloat(sub, "emissiveIntensity", renderConfig.emissiveIntensity);
+        renderConfig.bloomStrength = parseJsonFloat(sub, "bloomStrength", renderConfig.bloomStrength);
+        renderConfig.exposureKey = parseJsonFloat(sub, "exposureKey", renderConfig.exposureKey);
+        renderConfig.minExposure = parseJsonFloat(sub, "minExposure", renderConfig.minExposure);
+        renderConfig.maxExposure = parseJsonFloat(sub, "maxExposure", renderConfig.maxExposure);
+        renderConfig.fogDensity = parseJsonFloat(sub, "fogDensity", renderConfig.fogDensity);
+        renderConfig.fogHeightFalloff = parseJsonFloat(sub, "fogHeightFalloff", renderConfig.fogHeightFalloff);
+        renderConfig.fogBaseHeight = parseJsonFloat(sub, "fogBaseHeight", renderConfig.fogBaseHeight);
+        renderConfig.fogMaxOpacity = parseJsonFloat(sub, "fogMaxOpacity", renderConfig.fogMaxOpacity);
+        renderConfig.fogColor = parseJsonVec3(sub, "fogColor", renderConfig.fogColor);
+        renderConfig.sunAzimuthOffset = parseJsonFloat(sub, "sunAzimuthOffset", renderConfig.sunAzimuthOffset);
+        renderConfig.sunIntensityScale = parseJsonFloat(sub, "sunIntensityScale", renderConfig.sunIntensityScale);
+        renderConfig.pointLightScale = parseJsonFloat(sub, "pointLightScale", renderConfig.pointLightScale);
+    }
+    return true;
 }
 
 float Scene::progress() const {
@@ -105,7 +169,7 @@ bool Scene::loadStep() {
             double start = nowMs();
             while (nextTexture_ < textureRecords_.size() && nowMs() - start < 40.0) {
                 const auto& rec = textureRecords_[nextTexture_];
-                std::string path = std::string("bistro/textures/") + rec.name + ".tex";
+                std::string path = assetDir_ + "/textures/" + rec.name + ".tex";
                 if (!loadTexture(path, textures[nextTexture_], rec.name)) {
                     LOGE("Texture %s failed to load; using fallback", rec.name);
                 }
@@ -125,7 +189,8 @@ bool Scene::loadStep() {
             }
             stage_ = Stage::Done;
             status_ = "Ready";
-            LOGI("Scene loaded: %.1f MB of GPU memory allocated", ctx_->allocatedBytes / 1048576.0);
+            LOGI("Scene (%s) loaded: %.1f MB of GPU memory allocated", assetDir_.c_str(),
+                 ctx_->allocatedBytes / 1048576.0);
             return true;
         case Stage::Done:
             return true;
@@ -135,9 +200,10 @@ bool Scene::loadStep() {
 
 bool Scene::loadGeometry() {
     double t0 = nowMs();
-    AssetFile file(assets_, "bistro/scene.bin");
+    std::string scenePath = assetDir_ + "/scene.bin";
+    AssetFile file(assets_, scenePath);
     if (!file.valid() || file.size() < sizeof(bistro::SceneHeader)) {
-        LOGE("Unable to open bistro/scene.bin");
+        LOGE("Unable to open %s", scenePath.c_str());
         return false;
     }
     const uint8_t* p = file.data();
@@ -235,9 +301,9 @@ bool Scene::loadGeometry() {
     ctx_->flushUploads();
 
     if (!createFallbackTextures()) return false;
-    LOGI("Geometry loaded in %.0f ms: %u vertices, %llu triangles, %u clusters, %u materials, %u textures",
-         nowMs() - t0, header.vertexCount, static_cast<unsigned long long>(triangleCount), header.clusterCount,
-         header.materialCount, header.textureCount);
+    LOGI("Geometry (%s) loaded in %.0f ms: %u vertices, %llu triangles, %u clusters, %u materials, %u textures",
+         assetDir_.c_str(), nowMs() - t0, header.vertexCount, static_cast<unsigned long long>(triangleCount),
+         header.clusterCount, header.materialCount, header.textureCount);
     return true;
 }
 
@@ -312,11 +378,11 @@ bool Scene::loadTexture(const std::string& path, GpuImage& out, const char* debu
 }
 
 bool Scene::loadEnvironment() {
-    if (!loadTexture("bistro/sky.tex", sky, "Sky Equirect") ||
-        !loadTexture("bistro/env_specular.tex", envSpecular, "Prefiltered Specular Environment")) {
+    if (!loadTexture(assetDir_ + "/sky.tex", sky, "Sky Equirect") ||
+        !loadTexture(assetDir_ + "/env_specular.tex", envSpecular, "Prefiltered Specular Environment")) {
         return false;
     }
-    AssetFile file(assets_, "bistro/environment.bin");
+    AssetFile file(assets_, assetDir_ + "/environment.bin");
     if (!file.valid() || file.size() < 4 + 33 * sizeof(float) || memcmp(file.data(), "BENV", 4) != 0) {
         LOGE("environment.bin missing or invalid");
         return false;
@@ -339,4 +405,9 @@ void Scene::destroy() {
     textures.clear();
     ctx_->destroyImage(sky);
     ctx_->destroyImage(envSpecular);
+    clusters.clear();
+    materials.clear();
+    cameraKeys.clear();
+    pointLights.clear();
+    textureRecords_.clear();
 }

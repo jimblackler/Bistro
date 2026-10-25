@@ -50,6 +50,19 @@ JNIEXPORT jstring JNICALL Java_com_android_demo_bistro_MainActivity_nativeGetSta
     return env->NewStringUTF(s.c_str());
 }
 
+JNIEXPORT jboolean JNICALL Java_com_android_demo_bistro_MainActivity_nativeIsFlybyCompleted(JNIEnv*, jobject) {
+    return (gThread && gThread->isFlybyCompleted()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL Java_com_android_demo_bistro_MainActivity_nativeSetEnvironment(
+        JNIEnv* env, jobject, jstring assetDir, jboolean startFlyby) {
+    if (!gThread || !assetDir) return;
+    const char* chars = env->GetStringUTFChars(assetDir, nullptr);
+    std::string dir(chars ? chars : "");
+    if (chars) env->ReleaseStringUTFChars(assetDir, chars);
+    gThread->setEnvironment(dir, startFlyby == JNI_TRUE);
+}
+
 JNIEXPORT void JNICALL Java_com_android_demo_bistro_MainActivity_nativeSetDebugOptions(
         JNIEnv* env, jobject, jfloat startTime, jboolean freeze, jfloatArray camera) {
     if (!gThread) return;
