@@ -1,0 +1,179 @@
+{
+  "id": "jungle",
+  "order": 3,
+  "title": "Jungle Ruins",
+  "shortTitle": "Jungle Ruins",
+  "subtitle": "Mayan Pyramid \u00b7 Banyan & River Clearing",
+  "attribution": "Intel GPU Research Samples \u00b7 Characterised by Intel (CC BY 4.0)",
+  "sourceDir": "source_assets/JungleRuins",
+  "textureDir": "textures",
+  "usdBuildScript": "tools/build_jungle_gltf.py",
+  "fbxFiles": [
+    "JungleRuins_Scene.gltf"
+  ],
+  "hdrFile": "USD/kloppenheim_06_puresky_8k.hdr",
+  "licenseFile": "credits_license.txt",
+  "readmeFile": "credits_license.txt",
+  "aoRays": 24,
+  "aoMaxDistance": 45.0,
+  "aoMinVisibility": 0.25,
+  "aoMinOccluderArea": 0.01,
+  "weldGrid": 0.0,
+  "foliageWeldGrid": 0.0,
+  "foldConstantBaseColor": false,
+  "addCurtainGlass": false,
+  "deduplicateWithinScene": false,
+  "skipNodeSubstrings": [],
+  "pointLights": [
+    {
+      "position": [
+        -6.3,
+        11.5,
+        -29.8
+      ],
+      "range": 14.0,
+      "color": [
+        12.0,
+        7.5,
+        3.2
+      ]
+    }
+  ],
+  "renderConfig": {
+    "emissiveIntensity": 4.0,
+    "bloomStrength": 0.07,
+    "exposureKey": 0.2,
+    "minExposure": 0.35,
+    "maxExposure": 2.2,
+    "fogDensity": 0.0025,
+    "fogHeightFalloff": 0.04,
+    "fogBaseHeight": -8.0,
+    "fogMaxOpacity": 0.32,
+    "fogColor": [
+      0.68,
+      0.78,
+      0.86
+    ],
+    "sunAzimuthOffset": 0.0,
+    "sunIntensityScale": 1.15,
+    "pointLightScale": 1.0
+  },
+  "cameraLoops": [
+    {
+      "name": "Jungle River, Banyan & Pyramid Temple",
+      "speed": 4.2,
+      "smoothWindow": 0.65,
+      "indoor": false,
+      "keyframes": [
+        [
+          [
+            -6.3,
+            6.0,
+            -6.0
+          ],
+          [
+            -6.3,
+            9.5,
+            -29.8
+          ]
+        ],
+        [
+          [
+            -6.3,
+            8.5,
+            -13.0
+          ],
+          [
+            -6.3,
+            10.5,
+            -29.8
+          ]
+        ],
+        [
+          [
+            -16.0,
+            11.5,
+            -20.0
+          ],
+          [
+            -4.0,
+            10.0,
+            -29.8
+          ]
+        ],
+        [
+          [
+            -24.0,
+            13.5,
+            -30.0
+          ],
+          [
+            0.0,
+            9.5,
+            -25.0
+          ]
+        ],
+        [
+          [
+            -16.0,
+            15.0,
+            -44.0
+          ],
+          [
+            -6.3,
+            9.0,
+            -29.8
+          ]
+        ],
+        [
+          [
+            4.0,
+            15.0,
+            -44.0
+          ],
+          [
+            -6.3,
+            9.0,
+            -29.8
+          ]
+        ],
+        [
+          [
+            16.0,
+            13.5,
+            -30.0
+          ],
+          [
+            -6.3,
+            9.5,
+            -29.8
+          ]
+        ],
+        [
+          [
+            14.0,
+            12.5,
+            -16.0
+          ],
+          [
+            -6.3,
+            9.5,
+            -29.8
+          ]
+        ],
+        [
+          [
+            6.0,
+            9.5,
+            -8.0
+          ],
+          [
+            -6.3,
+            9.5,
+            -29.8
+          ]
+        ]
+      ]
+    }
+  ]
+}
