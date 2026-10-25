@@ -10,6 +10,9 @@ build/
 
 # Asset pipeline intermediates and local Python/tool environment
 /source_assets/*.zip
+/source_assets/ZeroDay_v1/
+/source_assets/IntelSponza/
+/source_assets/JungleRuins/
 /build_assets/
 /.venv/
 /tools/bin/
