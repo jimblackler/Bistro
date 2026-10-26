@@ -20,12 +20,29 @@ struct CameraOverride {
     Vec3 target;
 };
 
+// User-editable graphics quality and feature settings.
+struct GraphicsSettings {
+    float renderScale = 1.0f;           // [0.50, 1.00]
+    uint32_t shadowSize = 8192;         // 2048, 4096, or 8192
+    float minClusterPixels = 0.20f;     // [0.20, 3.00] small-cluster culling threshold in pixels
+    float bloomScale = 1.0f;            // [0.00, 2.00] multiplier on environment bloomStrength
+    float aoIntensityScale = 1.0f;      // [0.00, 2.00] multiplier on environment aoIntensity
+    bool ssrEnabled = true;
+    bool contactShadowsEnabled = true;
+    bool volumetricFogEnabled = true;
+    bool aoEnabled = true;
+    bool shadowPcfEnabled = true;
+    bool taaEnabled = true;
+    bool occlusionCulling = true;
+};
+
 struct RenderStats {
     float fps = 0.0f;
     float gpuMs = 0.0f;
     uint32_t visibleClusters[3] = {0, 0, 0};
     uint32_t visibleTriangles = 0;
     bool taa = false;
+    uint32_t shadowSize = 8192;
     uint32_t totalClusters = 0;
     uint64_t totalTriangles = 0;
     uint32_t renderWidth = 0;
@@ -56,8 +73,10 @@ public:
     [[nodiscard]] bool loadFailed() const { return scene_.failed() || initFailed_; }
     [[nodiscard]] const RenderStats& stats() const { return stats_; }
     [[nodiscard]] float loopDuration() const { return path_.loopDuration(); }
+    void applyGraphicsSettings(const GraphicsSettings& s);
     void setCameraOverride(const CameraOverride& o) {
         cameraOverride_ = o;
+        shadowFitted_ = false;
         invalidateHistory();  // camera may have jumped; last frame's data is no longer valid
     }
     void invalidateHistory() {
@@ -88,13 +107,13 @@ private:
     bool createGlobalResources();
     bool createDescriptorLayouts();
     bool createPipelines();
-    VkPipeline createGraphicsPipeline(const uint32_t* vs, size_t vsSize, const uint32_t* fs, size_t fsSize,
-                                      VkPipelineLayout layout, VkFormat colorFormat, VkFormat depthFormat,
-                                      VkSampleCountFlagBits samples, bool vertexInput, VkCullModeFlags cull,
-                                      bool depthTest, bool depthWrite, VkCompareOp depthCompare, int blendMode,
-                                      bool alphaToCoverage, uint32_t alphaModeConstant, bool depthBias,
+    VkPipeline createGraphicsPipeline(const uint32_t* vs, size_t vsSize, const char* vsName, const uint32_t* fs,
+                                      size_t fsSize, const char* fsName, VkPipelineLayout layout, VkFormat colorFormat,
+                                      VkFormat depthFormat, VkSampleCountFlagBits samples, bool vertexInput,
+                                      VkCullModeFlags cull, bool depthTest, bool depthWrite, VkCompareOp depthCompare,
+                                      int blendMode, bool alphaToCoverage, uint32_t alphaModeConstant, bool depthBias,
                                       const char* name, VkPipelineLayout layoutOverride = VK_NULL_HANDLE);
-    VkPipeline createComputePipeline(const uint32_t* cs, size_t size, const char* name,
+    VkPipeline createComputePipeline(const uint32_t* cs, size_t size, const char* csName, const char* name,
                                      VkPipelineLayout layout = VK_NULL_HANDLE);
     bool createSwapchain();
     void destroySwapchain();
@@ -103,6 +122,7 @@ private:
     void writeStaticDescriptors();
     void writeRenderTargetDescriptors();
     bool buildShadowMap();
+    void updateShadowFit(const CameraPath::Pose& pose);
     void updateUniforms(FrameResources& frame, double time, double dt);
     void recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t imageIndex);
     void recordLoading(VkCommandBuffer cmd, uint32_t imageIndex, double time);
@@ -170,6 +190,15 @@ private:
     bool aoEnabled_ = true;
     bool aoDebug_ = false;  // `setprop debug.bistro.aodebug 1`: show the ambient occlusion term only
     bool aoValid_ = false;
+    bool ssrEnabled_ = true;
+    bool contactShadowsEnabled_ = true;
+    bool volumetricFogEnabled_ = true;
+    bool shadowPcfEnabled_ = true;
+    float minClusterPixels_ = 0.20f;
+    float bloomScale_ = 1.0f;
+    float aoIntensityScale_ = 1.0f;
+    bool renderTargetsDirty_ = false;
+    bool shadowMapDirtySize_ = false;
     VkExtent2D aoExtent_{};
     GpuImage aoRaw_;
     std::array<GpuImage, kFramesInFlight> ao_;
@@ -181,12 +210,26 @@ private:
     std::array<VkImageView, kBloomLevels> bloomViews_{};
     std::array<VkExtent2D, kBloomLevels> bloomExtents_{};
 
-    // Static resources
+    // Directional shadow resources (camera-fitted orthographic window in light space)
+    struct ClusterLightBounds {
+        float mn[3];
+        float mx[3];
+    };
     GpuImage shadowMap_;
     uint32_t shadowSize_ = 8192;
+    Mat4 lightView_ = Mat4::identity();
     Mat4 shadowViewProj_ = Mat4::identity();
-    float shadowWorldTexel_ = 0.02f;
+    float sceneLightMin_[3] = {0.0f, 0.0f, 0.0f};
+    float sceneLightMax_[3] = {0.0f, 0.0f, 0.0f};
+    std::vector<ClusterLightBounds> clusterLightBounds_;
+    float shadowWorldTexel_ = 0.006f;
     bool shadowReady_ = false;
+    bool shadowFitted_ = false;
+    bool shadowDirty_ = false;
+    int shadowSegment_ = -1;
+    bool shadowOverride_ = false;
+    float shadowCenterX_ = 0.0f;
+    float shadowCenterY_ = 0.0f;
     GpuBuffer exposureBuffer_;
     GpuBuffer shadowDraws_;
     uint32_t shadowOpaqueCount_ = 0;

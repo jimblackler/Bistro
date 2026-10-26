@@ -24,9 +24,16 @@ void main() {
     color += frame.sunColor.rgb / solidAngle * disc * 0.02;
     color += frame.sunColor.rgb * pow(max(cosAngle, 0.0), 800.0) * 0.6;
 
-    // Haze toward the horizon to match the aerial perspective applied to geometry.
-    float horizon = pow(1.0 - clamp(abs(dir.y), 0.0, 1.0), 6.0);
-    color = mix(color, frame.fogColor.rgb, horizon * frame.fogParams.w * 0.6);
+    // Volumetric sun god-rays through foreground shadow casters & anisotropic Mie horizon haze.
+    float fogTransmittance = 1.0;
+    vec3 sunShafts = vec3(0.0);
+    vec3 skyWorldEnd = frame.cameraPos.xyz + dir * 80.0;
+    vec3 inscatter = evaluateVolumetricFog(skyWorldEnd, dir, 80.0, gl_FragCoord.xy, fogTransmittance, sunShafts);
+
+    float horizon = pow(1.0 - clamp(abs(dir.y), 0.0, 1.0), 5.5);
+    vec3 horizonColor = inscatter / max(1.0 - fogTransmittance, 1e-4);
+    color = mix(color, horizonColor, horizon * frame.fogParams.w * 0.65);
+    color += sunShafts / (1.0 + luminance(color) * 0.75);
     if (frame.envRotation.z < 0.0) {
         // Debug (`debug.bistro.skydebug`): magenta sky to reveal holes in the geometry.
         float l = dot(color, vec3(0.2126, 0.7152, 0.0722));

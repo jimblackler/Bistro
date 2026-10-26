@@ -170,6 +170,7 @@ void Renderer::setEnvironment(const std::string& assetDir) {
     if (!initialized_) return;
     if (assetDir == currentAssetDir_ && !scene_.failed() && !initFailed_) {
         lastCameraSegment_ = -1;
+        shadowFitted_ = false;
         invalidateHistory();
         return;
     }
@@ -180,7 +181,10 @@ void Renderer::setEnvironment(const std::string& assetDir) {
     for (auto& f : frames_) {
         ctx_.destroyBuffer(f.draws);
     }
+    clusterLightBounds_.clear();
     shadowReady_ = false;
+    shadowFitted_ = false;
+    shadowDirty_ = false;
     shadowOpaqueCount_ = 0;
     shadowMaskCount_ = 0;
     pointLights_.clear();
@@ -226,6 +230,7 @@ bool Renderer::createDescriptorLayouts() {
     add(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     add(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     add(13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    add(14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     add(15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096);
 
     std::vector<VkDescriptorBindingFlags> flags(b.size(), VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
@@ -238,6 +243,8 @@ bool Renderer::createDescriptorLayouts() {
     lci.bindingCount = static_cast<uint32_t>(b.size());
     lci.pBindings = b.data();
     if (vkCreateDescriptorSetLayout(ctx_.device, &lci, nullptr, &globalSetLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, globalSetLayout_, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                               "Global Descriptor Set Layout (Set 0)");
 
     VkDescriptorSetLayoutBinding tb{};
     tb.binding = 0;
@@ -248,6 +255,8 @@ bool Renderer::createDescriptorLayouts() {
     tci.bindingCount = 1;
     tci.pBindings = &tb;
     if (vkCreateDescriptorSetLayout(ctx_.device, &tci, nullptr, &textureSetLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, textureSetLayout_, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                               "Post-Process Texture Descriptor Set Layout (Set 1)");
 
     VkDescriptorSetLayoutBinding hb[2] = {};
     hb[0].binding = 0;
@@ -262,6 +271,8 @@ bool Renderer::createDescriptorLayouts() {
     hci.bindingCount = 2;
     hci.pBindings = hb;
     if (vkCreateDescriptorSetLayout(ctx_.device, &hci, nullptr, &hizSetLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, hizSetLayout_, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                               "Hi-Z Pyramid Descriptor Set Layout (Set 1)");
 
     VkDescriptorSetLayoutBinding taaBindings[3] = {};
     for (uint32_t i = 0; i < 3; ++i) {
@@ -274,6 +285,8 @@ bool Renderer::createDescriptorLayouts() {
     tlci.bindingCount = 3;
     tlci.pBindings = taaBindings;
     if (vkCreateDescriptorSetLayout(ctx_.device, &tlci, nullptr, &taaSetLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, taaSetLayout_, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                               "TAA Resolve Descriptor Set Layout (Set 1)");
 
     // SSAO compute: 0 = scene depth, 1 = AO input (blur), 2 = AO output (storage).
     VkDescriptorSetLayoutBinding aoBindings[3] = {};
@@ -288,6 +301,8 @@ bool Renderer::createDescriptorLayouts() {
     alci.bindingCount = 3;
     alci.pBindings = aoBindings;
     if (vkCreateDescriptorSetLayout(ctx_.device, &alci, nullptr, &aoSetLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, aoSetLayout_, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                               "SSAO Compute Descriptor Set Layout (Set 1)");
 
     VkPushConstantRange range{kAllStages, 0, kPushConstantSize};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -296,26 +311,31 @@ bool Renderer::createDescriptorLayouts() {
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &range;
     if (vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &pipelineLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, pipelineLayout_, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "Global Pipeline Layout");
     VkDescriptorSetLayout postSets[2] = {globalSetLayout_, textureSetLayout_};
     pli.setLayoutCount = 2;
     pli.pSetLayouts = postSets;
     if (vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &postLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, postLayout_, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "Post-Process Pipeline Layout");
     VkDescriptorSetLayout hizSets[2] = {globalSetLayout_, hizSetLayout_};
     pli.pSetLayouts = hizSets;
     if (vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &hizLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, hizLayout_, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "Hi-Z Compute Pipeline Layout");
     VkDescriptorSetLayout taaSets[2] = {globalSetLayout_, taaSetLayout_};
     pli.pSetLayouts = taaSets;
     if (vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &taaLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, taaLayout_, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "TAA Resolve Pipeline Layout");
     VkDescriptorSetLayout aoSets[2] = {globalSetLayout_, aoSetLayout_};
     pli.pSetLayouts = aoSets;
     if (vkCreatePipelineLayout(ctx_.device, &pli, nullptr, &aoLayout_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, aoLayout_, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "SSAO Compute Pipeline Layout");
 
     const uint32_t aoSetCount = static_cast<uint32_t>(aoSets_.size());
     VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kFramesInFlight},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-         (4096 + 7) * kFramesInFlight + kBloomLevels + 2 + kMaxHizLevels + 3 * kFramesInFlight + 2 * aoSetCount},
+         (4096 + 8) * kFramesInFlight + kBloomLevels + 2 + kMaxHizLevels + 3 * kFramesInFlight + 2 * aoSetCount},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxHizLevels + aoSetCount},
     };
     VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -323,8 +343,10 @@ bool Renderer::createDescriptorLayouts() {
     pci.poolSizeCount = 4;
     pci.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(ctx_.device, &pci, nullptr, &descriptorPool_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(ctx_.device, descriptorPool_, VK_OBJECT_TYPE_DESCRIPTOR_POOL, "Main Descriptor Pool");
 
-    for (auto& f : frames_) {
+    for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+        FrameResources& f = frames_[i];
         uint32_t variableCount = 4096;
         VkDescriptorSetVariableDescriptorCountAllocateInfo vci{
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO};
@@ -336,34 +358,47 @@ bool Renderer::createDescriptorLayouts() {
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &globalSetLayout_;
         if (vkAllocateDescriptorSets(ctx_.device, &ai, &f.set) != VK_SUCCESS) return false;
+        std::string name = "Global Descriptor Set [Frame " + std::to_string(i) + "]";
+        VulkanDebug::setObjectName(ctx_.device, f.set, VK_OBJECT_TYPE_DESCRIPTOR_SET, name.c_str());
     }
-    for (auto& s : bloomSourceSets_) {
+    for (size_t i = 0; i < bloomSourceSets_.size(); ++i) {
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = descriptorPool_;
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &textureSetLayout_;
-        if (vkAllocateDescriptorSets(ctx_.device, &ai, &s) != VK_SUCCESS) return false;
+        if (vkAllocateDescriptorSets(ctx_.device, &ai, &bloomSourceSets_[i]) != VK_SUCCESS) return false;
+        std::string name = i < 2 ? ("Bloom Source Descriptor Set [HDR Frame " + std::to_string(i) + "]")
+                                 : ("Bloom Source Descriptor Set [Mip " + std::to_string(i - 2) + "]");
+        VulkanDebug::setObjectName(ctx_.device, bloomSourceSets_[i], VK_OBJECT_TYPE_DESCRIPTOR_SET, name.c_str());
     }
-    for (auto& s : hizSets_) {
+    for (size_t i = 0; i < hizSets_.size(); ++i) {
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = descriptorPool_;
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &hizSetLayout_;
-        if (vkAllocateDescriptorSets(ctx_.device, &ai, &s) != VK_SUCCESS) return false;
+        if (vkAllocateDescriptorSets(ctx_.device, &ai, &hizSets_[i]) != VK_SUCCESS) return false;
+        std::string name = "Hi-Z Pyramid Descriptor Set [Mip " + std::to_string(i) + "]";
+        VulkanDebug::setObjectName(ctx_.device, hizSets_[i], VK_OBJECT_TYPE_DESCRIPTOR_SET, name.c_str());
     }
-    for (auto& s : taaSets_) {
+    for (size_t i = 0; i < taaSets_.size(); ++i) {
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = descriptorPool_;
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &taaSetLayout_;
-        if (vkAllocateDescriptorSets(ctx_.device, &ai, &s) != VK_SUCCESS) return false;
+        if (vkAllocateDescriptorSets(ctx_.device, &ai, &taaSets_[i]) != VK_SUCCESS) return false;
+        std::string name = "TAA Resolve Descriptor Set [Frame " + std::to_string(i) + "]";
+        VulkanDebug::setObjectName(ctx_.device, taaSets_[i], VK_OBJECT_TYPE_DESCRIPTOR_SET, name.c_str());
     }
-    for (auto& s : aoSets_) {
+    for (size_t i = 0; i < aoSets_.size(); ++i) {
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = descriptorPool_;
         ai.descriptorSetCount = 1;
         ai.pSetLayouts = &aoSetLayout_;
-        if (vkAllocateDescriptorSets(ctx_.device, &ai, &s) != VK_SUCCESS) return false;
+        if (vkAllocateDescriptorSets(ctx_.device, &ai, &aoSets_[i]) != VK_SUCCESS) return false;
+        std::string name = std::string((i % 2 == 0) ? "SSAO Raw Compute Descriptor Set [Frame "
+                                                    : "SSAO Blur Compute Descriptor Set [Frame ") +
+                           std::to_string(i / 2) + "]";
+        VulkanDebug::setObjectName(ctx_.device, aoSets_[i], VK_OBJECT_TYPE_DESCRIPTOR_SET, name.c_str());
     }
     return true;
 }
@@ -379,19 +414,23 @@ bool Renderer::createGlobalResources() {
     sci.anisotropyEnable = ctx_.maxAnisotropy > 1.0f;
     sci.maxAnisotropy = ctx_.maxAnisotropy;
     if (vkCreateSampler(dev, &sci, nullptr, &materialSampler_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(dev, materialSampler_, VK_OBJECT_TYPE_SAMPLER, "Material Anisotropic Repeat Sampler");
 
     sci.anisotropyEnable = VK_FALSE;
     sci.maxAnisotropy = 1.0f;
     sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (vkCreateSampler(dev, &sci, nullptr, &envSampler_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(dev, envSampler_, VK_OBJECT_TYPE_SAMPLER, "Environment LatLong Sampler");
 
     sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (vkCreateSampler(dev, &sci, nullptr, &linearClampSampler_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(dev, linearClampSampler_, VK_OBJECT_TYPE_SAMPLER, "Linear Clamp Sampler");
 
     sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     if (vkCreateSampler(dev, &sci, nullptr, &nearestSampler_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(dev, nearestSampler_, VK_OBJECT_TYPE_SAMPLER, "Nearest Clamp Sampler");
     sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
 
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
@@ -401,32 +440,39 @@ bool Renderer::createGlobalResources() {
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sci.maxLod = 0.0f;
     if (vkCreateSampler(dev, &sci, nullptr, &shadowSampler_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(dev, shadowSampler_, VK_OBJECT_TYPE_SAMPLER, "Shadow Depth Compare Sampler");
 
     for (uint32_t i = 0; i < kFramesInFlight; ++i) {
         FrameResources& f = frames_[i];
+        std::string suffix = " [Frame " + std::to_string(i) + "]";
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pci.queueFamilyIndex = ctx_.queueFamily;
         if (vkCreateCommandPool(dev, &pci, nullptr, &f.pool) != VK_SUCCESS) return false;
+        VulkanDebug::setObjectName(dev, f.pool, VK_OBJECT_TYPE_COMMAND_POOL, ("Frame Command Pool" + suffix).c_str());
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         ai.commandPool = f.pool;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         ai.commandBufferCount = 1;
         if (vkAllocateCommandBuffers(dev, &ai, &f.cmd) != VK_SUCCESS) return false;
+        VulkanDebug::setObjectName(dev, f.cmd, VK_OBJECT_TYPE_COMMAND_BUFFER, ("Frame Command Buffer" + suffix).c_str());
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         if (vkCreateFence(dev, &fci, nullptr, &f.fence) != VK_SUCCESS) return false;
+        VulkanDebug::setObjectName(dev, f.fence, VK_OBJECT_TYPE_FENCE, ("Frame In-Flight Fence" + suffix).c_str());
         VkSemaphoreCreateInfo sci2{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         if (vkCreateSemaphore(dev, &sci2, nullptr, &f.acquired) != VK_SUCCESS) return false;
+        VulkanDebug::setObjectName(dev, f.acquired, VK_OBJECT_TYPE_SEMAPHORE,
+                                   ("Image Acquired Semaphore" + suffix).c_str());
         if (!ctx_.createBuffer(sizeof(FrameUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               f.uniforms, "Frame Uniforms")) {
+                               f.uniforms, ("Frame Uniforms" + suffix).c_str())) {
             return false;
         }
         if (!ctx_.createBuffer(64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, f.counts,
-                               "Draw Counts")) {
+                               ("Indirect Draw Counts" + suffix).c_str())) {
             return false;
         }
     }
@@ -434,7 +480,7 @@ bool Renderer::createGlobalResources() {
     float initialExposure[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     if (!ctx_.createBuffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, exposureBuffer_,
-                           "Exposure State")) {
+                           "Auto-Exposure State Buffer")) {
         return false;
     }
     memcpy(exposureBuffer_.mapped, initialExposure, sizeof(initialExposure));
@@ -442,7 +488,9 @@ bool Renderer::createGlobalResources() {
     VkQueryPoolCreateInfo qci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
     qci.queryCount = 2 * kFramesInFlight;
-    vkCreateQueryPool(dev, &qci, nullptr, &timestampPool_);
+    if (vkCreateQueryPool(dev, &qci, nullptr, &timestampPool_) == VK_SUCCESS) {
+        VulkanDebug::setObjectName(dev, timestampPool_, VK_OBJECT_TYPE_QUERY_POOL, "Frame Timestamp Query Pool");
+    }
 
     // HDR and depth formats.
     const VkFormatFeatureFlags hdrFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
@@ -469,8 +517,9 @@ bool Renderer::createGlobalResources() {
     return true;
 }
 
-VkPipeline Renderer::createComputePipeline(const uint32_t* cs, size_t size, const char* name, VkPipelineLayout layout) {
-    VkShaderModule module = ctx_.createShaderModule(cs, size);
+VkPipeline Renderer::createComputePipeline(const uint32_t* cs, size_t size, const char* csName, const char* name,
+                                           VkPipelineLayout layout) {
+    VkShaderModule module = ctx_.createShaderModule(cs, size, csName);
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -485,15 +534,16 @@ VkPipeline Renderer::createComputePipeline(const uint32_t* cs, size_t size, cons
     return p;
 }
 
-VkPipeline Renderer::createGraphicsPipeline(const uint32_t* vs, size_t vsSize, const uint32_t* fs, size_t fsSize,
-                                            VkPipelineLayout layout, VkFormat colorFormat, VkFormat depthFormat,
-                                            VkSampleCountFlagBits samples, bool vertexInput, VkCullModeFlags cull,
-                                            bool depthTest, bool depthWrite, VkCompareOp depthCompare, int blendMode,
-                                            bool alphaToCoverage, uint32_t alphaModeConstant, bool depthBias,
-                                            const char* name, VkPipelineLayout layoutOverride) {
+VkPipeline Renderer::createGraphicsPipeline(const uint32_t* vs, size_t vsSize, const char* vsName, const uint32_t* fs,
+                                            size_t fsSize, const char* fsName, VkPipelineLayout layout,
+                                            VkFormat colorFormat, VkFormat depthFormat, VkSampleCountFlagBits samples,
+                                            bool vertexInput, VkCullModeFlags cull, bool depthTest, bool depthWrite,
+                                            VkCompareOp depthCompare, int blendMode, bool alphaToCoverage,
+                                            uint32_t alphaModeConstant, bool depthBias, const char* name,
+                                            VkPipelineLayout layoutOverride) {
     if (layoutOverride) layout = layoutOverride;
-    VkShaderModule vsm = ctx_.createShaderModule(vs, vsSize);
-    VkShaderModule fsm = fs ? ctx_.createShaderModule(fs, fsSize) : VK_NULL_HANDLE;
+    VkShaderModule vsm = ctx_.createShaderModule(vs, vsSize, vsName);
+    VkShaderModule fsm = fs ? ctx_.createShaderModule(fs, fsSize, fsName) : VK_NULL_HANDLE;
 
     struct {
         uint32_t alphaMode;
@@ -616,63 +666,62 @@ VkPipeline Renderer::createGraphicsPipeline(const uint32_t* vs, size_t vsSize, c
 }
 
 bool Renderer::createPipelines() {
-    cullPipeline_ = createComputePipeline(kCullComp, sizeof(kCullComp), "GPU Cluster Culling");
-    exposurePipeline_ = createComputePipeline(kExposureComp, sizeof(kExposureComp), "Auto Exposure");
-    aoPipeline_ = createComputePipeline(kAoComp, sizeof(kAoComp), "SSAO", aoLayout_);
-    aoBlurPipeline_ = createComputePipeline(kAoBlurComp, sizeof(kAoBlurComp), "SSAO Blur", aoLayout_);
-    {
-        VkShaderModule module = ctx_.createShaderModule(kHizComp, sizeof(kHizComp));
-        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        ci.stage.module = module;
-        ci.stage.pName = "main";
-        ci.layout = hizLayout_;
-        vkCreateComputePipelines(ctx_.device, VK_NULL_HANDLE, 1, &ci, nullptr, &hizPipeline_);
-        vkDestroyShaderModule(ctx_.device, module, nullptr);
-        VulkanDebug::setObjectName(ctx_.device, hizPipeline_, VK_OBJECT_TYPE_PIPELINE, "Hi-Z Pyramid Build");
-    }
+    cullPipeline_ = createComputePipeline(kCullComp, sizeof(kCullComp), "cull.comp", "GPU Cluster Culling (cull.comp)");
+    exposurePipeline_ =
+        createComputePipeline(kExposureComp, sizeof(kExposureComp), "exposure.comp", "Auto Exposure (exposure.comp)");
+    aoPipeline_ = createComputePipeline(kAoComp, sizeof(kAoComp), "ao.comp", "SSAO Compute (ao.comp)", aoLayout_);
+    aoBlurPipeline_ =
+        createComputePipeline(kAoBlurComp, sizeof(kAoBlurComp), "ao_blur.comp", "SSAO Blur (ao_blur.comp)", aoLayout_);
+    hizPipeline_ =
+        createComputePipeline(kHizComp, sizeof(kHizComp), "hiz.comp", "Hi-Z Pyramid Build (hiz.comp)", hizLayout_);
     const VkCompareOp reversedZ = VK_COMPARE_OP_GREATER_OR_EQUAL;
     const VkCompareOp reversedZStrict = VK_COMPARE_OP_GREATER;
-    opaquePipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), kSceneFrag, sizeof(kSceneFrag),
-                                             pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
-                                             VK_CULL_MODE_NONE, true, true, reversedZStrict, kBlendNone, false, 0,
-                                             false, "Scene Opaque");
-    maskPipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), kSceneFrag, sizeof(kSceneFrag),
-                                           pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
+    opaquePipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), "scene.vert", kSceneFrag,
+                                             sizeof(kSceneFrag), "scene.frag", pipelineLayout_, hdrFormat_,
+                                             depthFormat_, msaaSamples_, true, VK_CULL_MODE_NONE, true, true,
+                                             reversedZStrict, kBlendNone, false, 0, false,
+                                             "Scene Opaque (scene.vert + scene.frag)");
+    maskPipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), "scene.vert", kSceneFrag, sizeof(kSceneFrag),
+                                           "scene.frag", pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
                                            VK_CULL_MODE_NONE, true, true, reversedZStrict, kBlendNone,
                                            msaaSamples_ != VK_SAMPLE_COUNT_1_BIT &&
                                                debugProperty("debug.bistro.a2c", 1.0f) > 0.5f,
-                                           1, true, "Scene Alpha Mask");
-    blendPipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), kSceneFrag, sizeof(kSceneFrag),
-                                            pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, true,
-                                            VK_CULL_MODE_NONE, true, false, reversedZ, kBlendPremultiplied, false, 2,
-                                            false, "Scene Transparent");
-    skyPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), kSkyFrag, sizeof(kSkyFrag),
-                                          pipelineLayout_, hdrFormat_, depthFormat_, msaaSamples_, false,
-                                          VK_CULL_MODE_NONE, true, false, reversedZ, kBlendNone, false, 0, false,
-                                          "Sky");
-    shadowOpaquePipeline_ = createGraphicsPipeline(kShadowVert, sizeof(kShadowVert), nullptr, 0, pipelineLayout_,
-                                                   VK_FORMAT_UNDEFINED, VK_FORMAT_D16_UNORM, VK_SAMPLE_COUNT_1_BIT,
-                                                   true, VK_CULL_MODE_NONE, true, true, VK_COMPARE_OP_LESS_OR_EQUAL,
-                                                   kBlendNone, false, 0, true, "Shadow Opaque");
-    shadowMaskPipeline_ = createGraphicsPipeline(kShadowVert, sizeof(kShadowVert), kShadowFrag, sizeof(kShadowFrag),
-                                                 pipelineLayout_, VK_FORMAT_UNDEFINED, VK_FORMAT_D16_UNORM,
-                                                 VK_SAMPLE_COUNT_1_BIT, true, VK_CULL_MODE_NONE, true, true,
-                                                 VK_COMPARE_OP_LESS_OR_EQUAL, kBlendNone, false, 0, true,
-                                                 "Shadow Alpha Mask");
-    bloomDownPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), kBloomDownFrag,
-                                                sizeof(kBloomDownFrag), postLayout_, hdrFormat_, VK_FORMAT_UNDEFINED,
-                                                VK_SAMPLE_COUNT_1_BIT, false, VK_CULL_MODE_NONE, false, false,
-                                                VK_COMPARE_OP_ALWAYS, kBlendNone, false, 0, false, "Bloom Downsample");
-    taaPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), kTaaFrag, sizeof(kTaaFrag),
-                                          taaLayout_, hdrFormat_, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT, false,
-                                          VK_CULL_MODE_NONE, false, false, VK_COMPARE_OP_ALWAYS, kBlendNone, false, 0,
-                                          false, "TAA Resolve");
-    bloomUpPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), kBloomUpFrag,
-                                              sizeof(kBloomUpFrag), postLayout_, hdrFormat_, VK_FORMAT_UNDEFINED,
-                                              VK_SAMPLE_COUNT_1_BIT, false, VK_CULL_MODE_NONE, false, false,
-                                              VK_COMPARE_OP_ALWAYS, kBlendAdditive, false, 0, false, "Bloom Upsample");
+                                           1, true, "Scene Alpha Mask (scene.vert + scene.frag)");
+    blendPipeline_ = createGraphicsPipeline(kSceneVert, sizeof(kSceneVert), "scene.vert", kSceneFrag,
+                                            sizeof(kSceneFrag), "scene.frag", pipelineLayout_, hdrFormat_, depthFormat_,
+                                            msaaSamples_, true, VK_CULL_MODE_NONE, true, false, reversedZ,
+                                            kBlendPremultiplied, false, 2, false,
+                                            "Scene Transparent (scene.vert + scene.frag)");
+    skyPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), "fullscreen.vert", kSkyFrag,
+                                          sizeof(kSkyFrag), "sky.frag", pipelineLayout_, hdrFormat_, depthFormat_,
+                                          msaaSamples_, false, VK_CULL_MODE_NONE, true, false, reversedZ, kBlendNone,
+                                          false, 0, false, "Sky (fullscreen.vert + sky.frag)");
+    shadowOpaquePipeline_ = createGraphicsPipeline(kShadowVert, sizeof(kShadowVert), "shadow.vert", nullptr, 0, nullptr,
+                                                   pipelineLayout_, VK_FORMAT_UNDEFINED, VK_FORMAT_D16_UNORM,
+                                                   VK_SAMPLE_COUNT_1_BIT, true, VK_CULL_MODE_NONE, true, true,
+                                                   VK_COMPARE_OP_LESS_OR_EQUAL, kBlendNone, false, 0, true,
+                                                   "Shadow Opaque (shadow.vert)");
+    shadowMaskPipeline_ = createGraphicsPipeline(kShadowVert, sizeof(kShadowVert), "shadow.vert", kShadowFrag,
+                                                 sizeof(kShadowFrag), "shadow.frag", pipelineLayout_,
+                                                 VK_FORMAT_UNDEFINED, VK_FORMAT_D16_UNORM, VK_SAMPLE_COUNT_1_BIT, true,
+                                                 VK_CULL_MODE_NONE, true, true, VK_COMPARE_OP_LESS_OR_EQUAL, kBlendNone,
+                                                 false, 0, true, "Shadow Alpha Mask (shadow.vert + shadow.frag)");
+    bloomDownPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), "fullscreen.vert",
+                                                kBloomDownFrag, sizeof(kBloomDownFrag), "bloom_down.frag", postLayout_,
+                                                hdrFormat_, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT, false,
+                                                VK_CULL_MODE_NONE, false, false, VK_COMPARE_OP_ALWAYS, kBlendNone,
+                                                false, 0, false,
+                                                "Bloom Downsample (fullscreen.vert + bloom_down.frag)");
+    taaPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), "fullscreen.vert", kTaaFrag,
+                                          sizeof(kTaaFrag), "taa.frag", taaLayout_, hdrFormat_, VK_FORMAT_UNDEFINED,
+                                          VK_SAMPLE_COUNT_1_BIT, false, VK_CULL_MODE_NONE, false, false,
+                                          VK_COMPARE_OP_ALWAYS, kBlendNone, false, 0, false,
+                                          "TAA Resolve (fullscreen.vert + taa.frag)");
+    bloomUpPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), "fullscreen.vert", kBloomUpFrag,
+                                              sizeof(kBloomUpFrag), "bloom_up.frag", postLayout_, hdrFormat_,
+                                              VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT, false, VK_CULL_MODE_NONE,
+                                              false, false, VK_COMPARE_OP_ALWAYS, kBlendAdditive, false, 0, false,
+                                              "Bloom Upsample (fullscreen.vert + bloom_up.frag)");
     return cullPipeline_ && exposurePipeline_ && hizPipeline_ && taaPipeline_ && opaquePipeline_ && maskPipeline_ && blendPipeline_ &&
            skyPipeline_ && shadowOpaquePipeline_ && shadowMaskPipeline_ && bloomDownPipeline_ && bloomUpPipeline_ &&
            aoPipeline_ && aoBlurPipeline_;
@@ -690,6 +739,7 @@ bool Renderer::attachWindow(ANativeWindow* window) {
         LOGE("Failed to create surface");
         return false;
     }
+    VulkanDebug::setObjectName(ctx_.device, surface_, VK_OBJECT_TYPE_SURFACE_KHR, "Android Window Surface");
     VkBool32 supported = VK_FALSE;
     vkGetPhysicalDeviceSurfaceSupportKHR(ctx_.physicalDevice, ctx_.queueFamily, surface_, &supported);
     if (!supported) {
@@ -789,9 +839,15 @@ bool Renderer::createSwapchain() {
     swapchainViews_.resize(count);
     renderDone_.resize(count);
     for (uint32_t i = 0; i < count; ++i) {
-        swapchainViews_[i] = ctx_.createView(swapchainImages_[i], swapchainFormat_, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1);
+        std::string idxStr = " [" + std::to_string(i) + "]";
+        VulkanDebug::setObjectName(ctx_.device, swapchainImages_[i], VK_OBJECT_TYPE_IMAGE,
+                                   ("Swapchain Image" + idxStr).c_str());
+        swapchainViews_[i] = ctx_.createView(swapchainImages_[i], swapchainFormat_, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                                             ("Swapchain Image View" + idxStr).c_str());
         VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         vkCreateSemaphore(ctx_.device, &sci, nullptr, &renderDone_[i]);
+        VulkanDebug::setObjectName(ctx_.device, renderDone_[i], VK_OBJECT_TYPE_SEMAPHORE,
+                                   ("Render Complete Semaphore" + idxStr).c_str());
     }
     LOGI("Swapchain %ux%u (logical %ux%u), format %d, pre-rotation %u, %u images", swapchainExtent_.width,
          swapchainExtent_.height, logicalExtent_.width, logicalExtent_.height, swapchainFormat_, preRotation_, count);
@@ -799,16 +855,17 @@ bool Renderer::createSwapchain() {
     if (pipelineSwapchainFormat_ != swapchainFormat_) {
         if (tonemapPipeline_) vkDestroyPipeline(ctx_.device, tonemapPipeline_, nullptr);
         if (loadingPipeline_) vkDestroyPipeline(ctx_.device, loadingPipeline_, nullptr);
-        tonemapPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), kTonemapFrag,
-                                                  sizeof(kTonemapFrag), pipelineLayout_, swapchainFormat_,
-                                                  VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT, false,
+        tonemapPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), "fullscreen.vert",
+                                                  kTonemapFrag, sizeof(kTonemapFrag), "tonemap.frag", pipelineLayout_,
+                                                  swapchainFormat_, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT, false,
                                                   VK_CULL_MODE_NONE, false, false, VK_COMPARE_OP_ALWAYS, kBlendNone,
-                                                  false, 0, false, "Tonemap + Present");
-        loadingPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), kLoadingFrag,
-                                                  sizeof(kLoadingFrag), pipelineLayout_, swapchainFormat_,
-                                                  VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT, false,
+                                                  false, 0, false,
+                                                  "Tonemap + Present (fullscreen.vert + tonemap.frag)");
+        loadingPipeline_ = createGraphicsPipeline(kFullscreenVert, sizeof(kFullscreenVert), "fullscreen.vert",
+                                                  kLoadingFrag, sizeof(kLoadingFrag), "loading.frag", pipelineLayout_,
+                                                  swapchainFormat_, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT, false,
                                                   VK_CULL_MODE_NONE, false, false, VK_COMPARE_OP_ALWAYS, kBlendNone,
-                                                  false, 0, false, "Loading Screen");
+                                                  false, 0, false, "Loading Screen (fullscreen.vert + loading.frag)");
         pipelineSwapchainFormat_ = swapchainFormat_;
     }
     swapchainDirty_ = false;
@@ -860,7 +917,8 @@ bool Renderer::createRenderTargets() {
     d.name = "Bloom Chain";
     if (!ctx_.createImage(d, bloom_)) return false;
     for (uint32_t i = 0; i < kBloomLevels; ++i) {
-        bloomViews_[i] = ctx_.createView(bloom_.image, hdrFormat_, VK_IMAGE_ASPECT_COLOR_BIT, i, 1);
+        std::string mipViewName = "Bloom Chain View [Mip " + std::to_string(i) + "]";
+        bloomViews_[i] = ctx_.createView(bloom_.image, hdrFormat_, VK_IMAGE_ASPECT_COLOR_BIT, i, 1, mipViewName.c_str());
         bloomExtents_[i] = {std::max(1u, d.width >> i), std::max(1u, d.height >> i)};
     }
     // Depth resolve target and Hi-Z pyramid (power-of-two, at most the render resolution).
@@ -880,7 +938,7 @@ bool Renderer::createRenderTargets() {
             t.height = renderExtent_.height;
             t.format = hdrFormat_;
             t.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-            t.name = i == 0 ? "TAA History A" : "TAA History B";
+            t.name = i == 0 ? "TAA History [Frame 0]" : "TAA History [Frame 1]";
             if (!ctx_.createImage(t, taaOutput_[i])) return false;
         }
     }
@@ -903,13 +961,26 @@ bool Renderer::createRenderTargets() {
     d.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     d.name = "Hi-Z Pyramid";
     if (!ctx_.createImage(d, hiz_)) return false;
-    for (uint32_t i = 0; i < hizMipCount_; ++i)
-        hizViews_[i] = ctx_.createView(hiz_.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, i, 1);
+    for (uint32_t i = 0; i < hizMipCount_; ++i) {
+        std::string mipViewName = "Hi-Z Pyramid View [Mip " + std::to_string(i) + "]";
+        hizViews_[i] =
+            ctx_.createView(hiz_.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, i, 1, mipViewName.c_str());
+    }
     {
-        VkCommandBuffer cmd = ctx_.beginOneShot();
-        imageBarrier(cmd, hiz_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                     VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        VkCommandBuffer cmd = ctx_.beginOneShot("Init Hi-Z & TAA Layouts Command Buffer");
+        {
+            ScopedCmdLabel label(cmd, "Initialize Hi-Z & TAA Image Layouts", DebugColors::Transition);
+            imageBarrier(cmd, hiz_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                         VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            if (taaEnabled_) {
+                for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+                    imageBarrier(cmd, taaOutput_[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+                }
+            }
+        }
         ctx_.endOneShot(cmd);
     }
     hizValid_ = false;
@@ -925,14 +996,18 @@ bool Renderer::createRenderTargets() {
         a.name = "SSAO Raw";
         if (!ctx_.createImage(a, aoRaw_)) return false;
         for (uint32_t i = 0; i < kFramesInFlight; ++i) {
-            a.name = i == 0 ? "SSAO A" : "SSAO B";
+            a.name = i == 0 ? "SSAO Filtered [Frame 0]" : "SSAO Filtered [Frame 1]";
             if (!ctx_.createImage(a, ao_[i])) return false;
         }
-        VkCommandBuffer cmd = ctx_.beginOneShot();
-        for (GpuImage* img : {&aoRaw_, &ao_[0], &ao_[1]}) {
-            imageBarrier(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                         VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                         VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        VkCommandBuffer cmd = ctx_.beginOneShot("Init SSAO Layouts Command Buffer");
+        {
+            ScopedCmdLabel label(cmd, "Initialize SSAO Image Layouts", DebugColors::Transition);
+            for (GpuImage* img : {&aoRaw_, &ao_[0], &ao_[1]}) {
+                imageBarrier(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                             VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            }
         }
         ctx_.endOneShot(cmd);
     }
@@ -974,12 +1049,18 @@ void Renderer::writeRenderTargetDescriptors() {
     VkDescriptorImageInfo hdrInfo{linearClampSampler_, hdrResolve_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo bloomInfo{linearClampSampler_, bloomViews_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo hizInfo{nearestSampler_, hiz_.view, VK_IMAGE_LAYOUT_GENERAL};
-    // With TAA, post-processing in frame slot i reads that slot's TAA output.
+    // With TAA, post-processing in frame slot i reads that slot's TAA output, while SSR during the
+    // main pass reads the previous frame's TAA output ((i + 1) % kFramesInFlight).
     std::array<VkDescriptorImageInfo, kFramesInFlight> postInputs{};
+    std::array<VkDescriptorImageInfo, kFramesInFlight> prevHdrInputs{};
     for (uint32_t i = 0; i < kFramesInFlight; ++i) {
         postInputs[i] = taaEnabled_ ? VkDescriptorImageInfo{linearClampSampler_, taaOutput_[i].view,
                                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
                                     : hdrInfo;
+        prevHdrInputs[i] = taaEnabled_ ? VkDescriptorImageInfo{linearClampSampler_,
+                                                               taaOutput_[(i + 1) % kFramesInFlight].view,
+                                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+                                       : bloomInfo;
     }
     std::array<VkDescriptorImageInfo, 3 * kFramesInFlight> taaInfos{};
     if (taaEnabled_) {
@@ -1011,6 +1092,9 @@ void Renderer::writeRenderTargetDescriptors() {
         writes.push_back(w);
         w.dstBinding = 13;
         w.pImageInfo = &hizInfo;
+        writes.push_back(w);
+        w.dstBinding = 14;
+        w.pImageInfo = &prevHdrInputs[fi];
         writes.push_back(w);
     }
     // SSAO: frame slot i reads the AO written by the previous frame, i.e. slot (i + 1) % 2.
@@ -1096,11 +1180,13 @@ void Renderer::writeStaticDescriptors() {
     VkDescriptorBufferInfo materialInfo{scene_.materialBuffer.buffer, 0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo exposureInfo{exposureBuffer_.buffer, 0, VK_WHOLE_SIZE};
 
-    for (auto& f : frames_) {
+    for (uint32_t fi = 0; fi < kFramesInFlight; ++fi) {
+        FrameResources& f = frames_[fi];
         if (!f.draws.buffer) {
+            std::string drawsName = currentAssetDir_ + "/scene.bin Indirect Draws [Frame " + std::to_string(fi) + "]";
             ctx_.createBuffer(static_cast<VkDeviceSize>(capacity) * kBucketCount * sizeof(DrawCommand),
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
-                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, f.draws, "Indirect Draws");
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, f.draws, drawsName.c_str());
         }
         VkDescriptorBufferInfo uboInfo{f.uniforms.buffer, 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo drawInfo{f.draws.buffer, 0, VK_WHOLE_SIZE};
@@ -1139,7 +1225,7 @@ void Renderer::writeStaticDescriptors() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Static sun shadow map
+// Camera-fitted directional sun shadow map
 // ------------------------------------------------------------------------------------------------
 
 bool Renderer::buildShadowMap() {
@@ -1163,102 +1249,173 @@ bool Renderer::buildShadowMap() {
     LOGI("Sun direction (%.3f %.3f %.3f), env yaw %.2f rad", sunDirection_.x, sunDirection_.y, sunDirection_.z,
          envYaw_);
 
-    // Fit an orthographic projection around the whole scene in light space.
+    // Precompute the fixed light-space view matrix and per-cluster light-space AABBs so the shadow map
+    // orthographic projection can be tightly fitted around the active camera frustum without swimming.
     Vec3 up = std::fabs(sunDirection_.y) > 0.99f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
     Vec3 center{(scene_.header.boundsMin[0] + scene_.header.boundsMax[0]) * 0.5f,
                 (scene_.header.boundsMin[1] + scene_.header.boundsMax[1]) * 0.5f,
                 (scene_.header.boundsMin[2] + scene_.header.boundsMax[2]) * 0.5f};
-    Mat4 lightView = Mat4::lookAt(center + sunDirection_ * 200.0f, center, up);
-    float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
-    for (const auto& c : scene_.clusters) {
+    lightView_ = Mat4::lookAt(center + sunDirection_ * 200.0f, center, up);
+
+    clusterLightBounds_.resize(scene_.clusters.size());
+    sceneLightMin_[0] = sceneLightMin_[1] = sceneLightMin_[2] = 1e30f;
+    sceneLightMax_[0] = sceneLightMax_[1] = sceneLightMax_[2] = -1e30f;
+    for (size_t i = 0; i < scene_.clusters.size(); ++i) {
+        const auto& c = scene_.clusters[i];
+        float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
         for (int k = 0; k < 8; ++k) {
             Vec4 p{(k & 1) ? c.aabbMax[0] : c.aabbMin[0], (k & 2) ? c.aabbMax[1] : c.aabbMin[1],
                    (k & 4) ? c.aabbMax[2] : c.aabbMin[2], 1.0f};
-            Vec4 v = lightView * p;
+            Vec4 v = lightView_ * p;
             mn[0] = std::min(mn[0], v.x); mx[0] = std::max(mx[0], v.x);
             mn[1] = std::min(mn[1], v.y); mx[1] = std::max(mx[1], v.y);
             mn[2] = std::min(mn[2], v.z); mx[2] = std::max(mx[2], v.z);
         }
+        for (int a = 0; a < 3; ++a) {
+            clusterLightBounds_[i].mn[a] = mn[a];
+            clusterLightBounds_[i].mx[a] = mx[a];
+            sceneLightMin_[a] = std::min(sceneLightMin_[a], mn[a]);
+            sceneLightMax_[a] = std::max(sceneLightMax_[a], mx[a]);
+        }
     }
-    Mat4 lightProj = Mat4::orthographic(mn[0], mx[0], mn[1], mx[1], -mx[2] - 1.0f, -mn[2] + 1.0f);
-    shadowViewProj_ = lightProj * lightView;
-    shadowWorldTexel_ = std::max(mx[0] - mn[0], mx[1] - mn[1]) / static_cast<float>(shadowSize_);
-    LOGI("Shadow map covers %.1f x %.1f m (%.1f cm texels), depth range %.1f m", mx[0] - mn[0], mx[1] - mn[1],
-         shadowWorldTexel_ * 100.0f, mx[2] - mn[2]);
 
+    std::string shadowMapName = currentAssetDir_ + " Camera-Fitted Sun Shadow Map";
     ImageDesc d;
     d.width = d.height = shadowSize_;
     d.format = VK_FORMAT_D16_UNORM;
     d.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     d.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-    d.name = "Static Sun Shadow Map";
+    d.name = shadowMapName.c_str();
     if (!ctx_.createImage(d, shadowMap_)) return false;
 
-    // Draw lists for the shadow pass: every opaque and alpha-tested cluster (glass casts no shadow so
-    // sunlight can stream through the windows).
-    std::vector<DrawCommand> draws;
-    for (uint32_t pass = 0; pass < 2; ++pass) {
-        for (uint32_t i = 0; i < scene_.clusters.size(); ++i) {
-            const auto& c = scene_.clusters[i];
-            if (c.bucket != (pass == 0 ? kBucketOpaque : kBucketMask)) continue;
-            draws.push_back({c.indexCount, 1, c.firstIndex, c.vertexOffset, i});
-        }
-        (pass == 0 ? shadowOpaqueCount_ : shadowMaskCount_) =
-            static_cast<uint32_t>(draws.size()) - (pass == 0 ? 0 : shadowOpaqueCount_);
-    }
-    if (!ctx_.createBuffer(draws.size() * sizeof(DrawCommand),
-                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, shadowDraws_, "Shadow Draws")) {
+    std::string shadowDrawsName = currentAssetDir_ + "/scene.bin Shadow Indirect Draws";
+    const size_t drawCapacity = std::max<size_t>(1, scene_.clusters.size()) * kFramesInFlight;
+    if (!ctx_.createBuffer(drawCapacity * sizeof(DrawCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, shadowDraws_,
+                           shadowDrawsName.c_str())) {
         return false;
     }
-    ctx_.uploadBuffer(shadowDraws_, 0, draws.data(), draws.size() * sizeof(DrawCommand));
     ctx_.flushUploads();
 
     writeStaticDescriptors();
 
-    VkCommandBuffer cmd = ctx_.beginOneShot();
+    VkCommandBuffer cmd = ctx_.beginOneShot("Init Shadow Map Layout Command Buffer");
     {
-        ScopedCmdLabel label(cmd, "Static Shadow Map", DebugColors::RenderPass);
+        ScopedCmdLabel label(cmd, "Initialize Shadow Map Image Layout", DebugColors::Transition);
         imageBarrier(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
-                     VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-        VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        depth.imageView = shadowMap_.view;
-        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        depth.clearValue.depthStencil = {1.0f, 0};
-        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-        ri.renderArea = {{0, 0}, {shadowSize_, shadowSize_}};
-        ri.layerCount = 1;
-        ri.pDepthAttachment = &depth;
-        vkCmdBeginRendering(cmd, &ri);
-        VkViewport vp{0, 0, static_cast<float>(shadowSize_), static_cast<float>(shadowSize_), 0, 1};
-        VkRect2D sc{{0, 0}, {shadowSize_, shadowSize_}};
-        vkCmdSetViewport(cmd, 0, 1, &vp);
-        vkCmdSetScissor(cmd, 0, 1, &sc);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &frames_[0].set, 0,
-                                nullptr);
-        vkCmdPushConstants(cmd, pipelineLayout_, kAllStages, 0, sizeof(Mat4), &shadowViewProj_);
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &scene_.vertexBuffer.buffer, &offset);
-        vkCmdBindIndexBuffer(cmd, scene_.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT16);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowOpaquePipeline_);
-        vkCmdDrawIndexedIndirect(cmd, shadowDraws_.buffer, 0, shadowOpaqueCount_, sizeof(DrawCommand));
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowMaskPipeline_);
-        vkCmdDrawIndexedIndirect(cmd, shadowDraws_.buffer, shadowOpaqueCount_ * sizeof(DrawCommand),
-                                 shadowMaskCount_, sizeof(DrawCommand));
-        vkCmdEndRendering(cmd);
-        imageBarrier(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     }
     ctx_.endOneShot(cmd);
+
+    shadowFitted_ = false;
+    shadowDirty_ = true;
     shadowReady_ = true;
-    LOGI("Static shadow map rendered (%u opaque + %u masked clusters)", shadowOpaqueCount_, shadowMaskCount_);
     return true;
+}
+
+void Renderer::updateShadowFit(const CameraPath::Pose& pose) {
+    if (scene_.clusters.empty() || !shadowDraws_.mapped) return;
+
+    Vec3 fwd = normalize(pose.target - pose.eye);
+    const float focusDist = pose.indoor ? 10.0f : 24.0f;
+    Vec3 focusWorld = pose.eye + fwd * focusDist;
+    Vec4 focusLight = lightView_ * Vec4{focusWorld.x, focusWorld.y, focusWorld.z, 1.0f};
+
+    if (!cameraOverride_.enabled) {
+        // Fit once per camera loop so shadowViewProj_ is 100% invariant during the entire fly-through
+        // (zero mid-flight refit jumps, zero caster popping, and zero shadow-border snapping).
+        if (shadowFitted_ && pose.segment == shadowSegment_ && !shadowOverride_) {
+            return;
+        }
+    } else {
+        const float moved = std::hypot(focusLight.x - shadowCenterX_, focusLight.y - shadowCenterY_);
+        if (shadowFitted_ && shadowOverride_ && pose.indoor == (shadowSegment_ == 1) && moved <= 2.0f) {
+            return;
+        }
+    }
+
+    float mnX = sceneLightMin_[0];
+    float mxX = sceneLightMax_[0];
+    float mnY = sceneLightMin_[1];
+    float mxY = sceneLightMax_[1];
+
+    float loopMin[2] = {0.0f, 0.0f};
+    float loopMax[2] = {0.0f, 0.0f};
+    const float lookAheadDist = pose.indoor ? 15.0f : 45.0f;
+    const float pad = pose.indoor ? 16.0f : 40.0f;
+
+    if (!cameraOverride_.enabled && path_.loopLightBounds(pose.segment, lightView_, lookAheadDist, loopMin, loopMax)) {
+        mnX = std::max(sceneLightMin_[0], loopMin[0] - pad);
+        mxX = std::min(sceneLightMax_[0], loopMax[0] + pad);
+        mnY = std::max(sceneLightMin_[1], loopMin[1] - pad);
+        mxY = std::min(sceneLightMax_[1], loopMax[1] + pad);
+    } else {
+        const float halfSpan = pose.indoor ? 24.0f : 68.0f;
+        mnX = std::max(sceneLightMin_[0], focusLight.x - halfSpan);
+        mxX = std::min(sceneLightMax_[0], focusLight.x + halfSpan);
+        mnY = std::max(sceneLightMin_[1], focusLight.y - halfSpan);
+        mxY = std::min(sceneLightMax_[1], focusLight.y + halfSpan);
+    }
+
+    if (mxX - mnX < 8.0f) {
+        float c = 0.5f * (mnX + mxX);
+        mnX = c - 4.0f;
+        mxX = c + 4.0f;
+    }
+    if (mxY - mnY < 8.0f) {
+        float c = 0.5f * (mnY + mxY);
+        mnY = c - 4.0f;
+        mxY = c + 4.0f;
+    }
+
+    const float spanX = mxX - mnX;
+    const float spanY = mxY - mnY;
+    const float worldTexel = std::max(spanX, spanY) / static_cast<float>(shadowSize_);
+
+    shadowFitted_ = true;
+    shadowSegment_ = cameraOverride_.enabled ? (pose.indoor ? 1 : 0) : pose.segment;
+    shadowOverride_ = cameraOverride_.enabled;
+    shadowCenterX_ = focusLight.x;
+    shadowCenterY_ = focusLight.y;
+
+    float mnZ = 1e30f;
+    float mxZ = -1e30f;
+    const size_t capacity = scene_.clusters.size();
+    auto* dst = static_cast<DrawCommand*>(shadowDraws_.mapped) + static_cast<size_t>(frameIndex_) * capacity;
+    uint32_t count = 0;
+
+    for (uint32_t pass = 0; pass < 2; ++pass) {
+        const uint32_t targetBucket = (pass == 0) ? kBucketOpaque : kBucketMask;
+        for (uint32_t i = 0; i < capacity; ++i) {
+            const auto& c = scene_.clusters[i];
+            if (c.bucket != targetBucket) continue;
+            const auto& b = clusterLightBounds_[i];
+            if (b.mx[0] < mnX || b.mn[0] > mxX || b.mx[1] < mnY || b.mn[1] > mxY) continue;
+            mnZ = std::min(mnZ, b.mn[2]);
+            mxZ = std::max(mxZ, b.mx[2]);
+            dst[count++] = {c.indexCount, 1, c.firstIndex, c.vertexOffset, i};
+        }
+        if (pass == 0) {
+            shadowOpaqueCount_ = count;
+        } else {
+            shadowMaskCount_ = count - shadowOpaqueCount_;
+        }
+    }
+    if (mnZ > mxZ) {
+        mnZ = sceneLightMin_[2];
+        mxZ = sceneLightMax_[2];
+    } else {
+        mnZ -= 4.0f;
+        mxZ += 4.0f;
+    }
+
+    Mat4 lightProj = Mat4::orthographic(mnX, mxX, mnY, mxY, -mxZ - 1.0f, -mnZ + 1.0f);
+    shadowViewProj_ = lightProj * lightView_;
+    shadowWorldTexel_ = worldTexel;
+    shadowDirty_ = true;
+    LOGI("Loop-fitted shadow map (seg %d): %.1f x %.1f m (%.2f cm texels, depth %.1f m, %u opaque + %u masked clusters)",
+         pose.segment, spanX, spanY, shadowWorldTexel_ * 100.0f, mxZ - mnZ, shadowOpaqueCount_, shadowMaskCount_);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1278,6 +1435,7 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
         lastCameraSegment_ = pose.segment;
         invalidateHistory();
     }
+    updateShadowFit(pose);
     stats_.cameraPos = pose.eye;
     stats_.cameraSegment = pose.segment;
     stats_.cameraSegmentName = path_.loopName(pose.segment);
@@ -1359,22 +1517,22 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
         u.fogColor[2] = avg[2] * 0.95f;
     }
 
-    u.renderParams[0] = 1.0f;              // manual exposure multiplier (on top of auto exposure)
-    u.renderParams[1] = rc.bloomStrength;  // bloom strength
+    u.renderParams[0] = 1.0f;                             // manual exposure multiplier (on top of auto exposure)
+    u.renderParams[1] = rc.bloomStrength * bloomScale_;   // bloom strength
     u.renderParams[2] = static_cast<float>(renderExtent_.width);
     u.renderParams[3] = static_cast<float>(renderExtent_.height);
     u.cullParams[0] = static_cast<float>(scene_.clusters.size());
     u.cullParams[1] = static_cast<float>(scene_.clusters.size());
     u.cullParams[2] = static_cast<float>(renderExtent_.height) / (2.0f * std::tan(kFovY * 0.5f));
-    u.cullParams[3] = 0.6f;  // minimum projected radius in pixels
+    u.cullParams[3] = minClusterPixels_;  // minimum projected radius in pixels
     u.postParams[0] = static_cast<float>(preRotation_);
     u.postParams[1] = static_cast<float>(swapchainExtent_.width);
     u.postParams[2] = static_cast<float>(swapchainExtent_.height);
     u.postParams[3] = rc.emissiveIntensity;  // emissive intensity
     u.shadowParams[0] = 1.0f / static_cast<float>(shadowSize_);
-    u.shadowParams[1] = shadowWorldTexel_ * 1.5f;
-    u.shadowParams[2] = 0.00002f;
-    u.shadowParams[3] = 1.6f;
+    u.shadowParams[1] = shadowWorldTexel_ * 1.35f;
+    u.shadowParams[2] = 0.00003f;
+    u.shadowParams[3] = 1.8f;
     u.extraParams[0] = swapchainNeedsSrgbEncode_ ? 1.0f : 0.0f;
     u.extraParams[1] = 0.25f;  // vignette
     u.extraParams[2] = 1.08f;  // saturation
@@ -1391,16 +1549,20 @@ void Renderer::updateUniforms(FrameResources& frame, double time, double dt) {
     u.occlusionParams[1] = static_cast<float>(hizExtent_.height);
     u.occlusionParams[2] = static_cast<float>(hizMipCount_);
     u.occlusionParams[3] = (occlusionCulling_ && hizValid_) ? 1.0f : 0.0f;
-    u.aoParams[0] = (aoEnabled_ && aoValid_ && rc.aoIntensity > 0.0f) ? 1.0f : 0.0f;
+    float effAoIntensity = rc.aoIntensity * aoIntensityScale_;
+    u.aoParams[0] = (aoEnabled_ && aoValid_ && effAoIntensity > 0.0f) ? 1.0f : 0.0f;
     u.aoParams[1] = rc.aoRadius;
-    u.aoParams[2] = rc.aoIntensity;
+    u.aoParams[2] = effAoIntensity;
     u.aoParams[3] = aoDebug_ ? 1.0f : 0.0f;
     uint32_t lightCount = static_cast<uint32_t>(pointLights_.size() / 2);
     for (uint32_t i = 0; i < lightCount; ++i) {
         memcpy(&u.lights[i][0], &pointLights_[i * 2], sizeof(Vec4));
         memcpy(&u.lights[i][4], &pointLights_[i * 2 + 1], sizeof(Vec4));
     }
+    uint32_t featureFlags = (ssrEnabled_ ? 1u : 0u) | (contactShadowsEnabled_ ? 2u : 0u) |
+                            (volumetricFogEnabled_ ? 4u : 0u) | (shadowPcfEnabled_ ? 8u : 0u);
     u.lightCount[0] = lightCount;
+    u.lightCount[1] = featureFlags;
     memcpy(frame.uniforms.mapped, &u, sizeof(u));
 }
 
@@ -1409,6 +1571,7 @@ void Renderer::readBackStats(FrameResources& frame, uint32_t frameIndex) {
     for (int i = 0; i < 3; ++i) stats_.visibleClusters[i] = counts[i];
     stats_.visibleTriangles = counts[3];
     stats_.taa = taaEnabled_;
+    stats_.shadowSize = shadowSize_;
     stats_.totalClusters = static_cast<uint32_t>(scene_.clusters.size());
     stats_.totalTriangles = scene_.triangleCount;
     if (frame.timestampsValid && timestampPool_) {
@@ -1423,6 +1586,7 @@ void Renderer::readBackStats(FrameResources& frame, uint32_t frameIndex) {
 }
 
 void Renderer::recordLoading(VkCommandBuffer cmd, uint32_t imageIndex, double time) {
+    ScopedCmdLabel label(cmd, "Loading Screen (fullscreen.vert + loading.frag)", DebugColors::RenderPass);
     VkImage image = swapchainImages_[imageIndex];
     imageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
@@ -1467,9 +1631,57 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &frame.set, 0, nullptr);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &frame.set, 0, nullptr);
 
+    // 0. Camera-fitted directional shadow pass (recorded when the camera moves beyond the guard band).
+    if (shadowDirty_) {
+        shadowDirty_ = false;
+        ScopedCmdLabel label(cmd, "Camera-Fitted Shadow Map (shadow.vert + shadow.frag)", DebugColors::RenderPass);
+        imageBarrier(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+        VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        depth.imageView = shadowMap_.view;
+        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depth.clearValue.depthStencil = {1.0f, 0};
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea = {{0, 0}, {shadowSize_, shadowSize_}};
+        ri.layerCount = 1;
+        ri.pDepthAttachment = &depth;
+        vkCmdBeginRendering(cmd, &ri);
+        VkViewport vp{0, 0, static_cast<float>(shadowSize_), static_cast<float>(shadowSize_), 0, 1};
+        VkRect2D sc{{0, 0}, {shadowSize_, shadowSize_}};
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdPushConstants(cmd, pipelineLayout_, kAllStages, 0, sizeof(Mat4), &shadowViewProj_);
+        VkDeviceSize vbOffset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &scene_.vertexBuffer.buffer, &vbOffset);
+        vkCmdBindIndexBuffer(cmd, scene_.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT16);
+        const VkDeviceSize slotOffset = static_cast<VkDeviceSize>(frameIndex_) * capacity * sizeof(DrawCommand);
+        if (shadowOpaqueCount_ > 0) {
+            ScopedCmdLabel l(cmd, "Shadow Opaque (shadow.vert)", DebugColors::Draw);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowOpaquePipeline_);
+            vkCmdDrawIndexedIndirect(cmd, shadowDraws_.buffer, slotOffset, shadowOpaqueCount_, sizeof(DrawCommand));
+        }
+        if (shadowMaskCount_ > 0) {
+            ScopedCmdLabel l(cmd, "Shadow Alpha Mask (shadow.vert + shadow.frag)", DebugColors::Draw);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowMaskPipeline_);
+            vkCmdDrawIndexedIndirect(cmd, shadowDraws_.buffer,
+                                     slotOffset + shadowOpaqueCount_ * sizeof(DrawCommand), shadowMaskCount_,
+                                     sizeof(DrawCommand));
+        }
+        vkCmdEndRendering(cmd);
+        imageBarrier(cmd, shadowMap_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
+
     // 1. GPU culling -> indirect draw lists.
     {
-        ScopedCmdLabel label(cmd, "GPU Culling", DebugColors::Transfer);
+        ScopedCmdLabel label(cmd, "GPU Cluster Culling (cull.comp)", DebugColors::Transfer);
         vkCmdFillBuffer(cmd, frame.counts.buffer, 0, 16, 0);
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -1482,7 +1694,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 
     // 2. Main HDR pass (jittered for TAA, or 4x MSAA resolved on-tile).
     {
-        ScopedCmdLabel label(cmd, "Main Pass", DebugColors::RenderPass);
+        ScopedCmdLabel label(cmd, "Main HDR Pass", DebugColors::RenderPass);
         if (msaaColor_.image) {
             imageBarrier(cmd, msaaColor_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -1552,24 +1764,24 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
         vkCmdBindIndexBuffer(cmd, scene_.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT16);
 
         {
-            ScopedCmdLabel l(cmd, "Opaque", DebugColors::Draw);
+            ScopedCmdLabel l(cmd, "Opaque (scene.vert + scene.frag)", DebugColors::Draw);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline_);
             vkCmdDrawIndexedIndirectCount(cmd, frame.draws.buffer, 0, frame.counts.buffer, 0, capacity,
                                           sizeof(DrawCommand));
         }
         {
-            ScopedCmdLabel l(cmd, "Alpha Tested", DebugColors::Draw);
+            ScopedCmdLabel l(cmd, "Alpha Tested (scene.vert + scene.frag)", DebugColors::Draw);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, maskPipeline_);
             vkCmdDrawIndexedIndirectCount(cmd, frame.draws.buffer, bucketStride, frame.counts.buffer, 4, capacity,
                                           sizeof(DrawCommand));
         }
         {
-            ScopedCmdLabel l(cmd, "Sky", DebugColors::Draw);
+            ScopedCmdLabel l(cmd, "Sky (fullscreen.vert + sky.frag)", DebugColors::Draw);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
             vkCmdDraw(cmd, 3, 1, 0, 0);
         }
         {
-            ScopedCmdLabel l(cmd, "Transparent", DebugColors::Draw);
+            ScopedCmdLabel l(cmd, "Transparent (scene.vert + scene.frag)", DebugColors::Draw);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, blendPipeline_);
             vkCmdDrawIndexedIndirectCount(cmd, frame.draws.buffer, bucketStride * 2, frame.counts.buffer, 8,
                                           capacity, sizeof(DrawCommand));
@@ -1589,7 +1801,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 
     // 3. Hi-Z pyramid from this frame's depth, used to occlusion-cull next frame.
     if (buildHiz_) {
-        ScopedCmdLabel label(cmd, "Hi-Z Build", DebugColors::Transfer);
+        ScopedCmdLabel label(cmd, "Hi-Z Pyramid Build (hiz.comp)", DebugColors::Transfer);
         // This frame's culling has read the pyramid; make the rewrite wait for it.
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
@@ -1618,7 +1830,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 
     // 4. Screen-space AO from this frame's depth (consumed, reprojected, by the next frame's shading).
     if (aoEnabled_) {
-        ScopedCmdLabel label(cmd, "SSAO", DebugColors::Transfer);
+        ScopedCmdLabel label(cmd, "Screen-Space AO (ao.comp + ao_blur.comp)", DebugColors::Transfer);
         // aoRaw_ was read by the previous frame's blur and ao_[slot] by the frame before last's shading.
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                       VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -1628,16 +1840,22 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
         const uint32_t gx = (aoExtent_.width + 7) / 8, gy = (aoExtent_.height + 7) / 8;
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoLayout_, 0, 1, &frame.set, 0, nullptr);
         vkCmdPushConstants(cmd, aoLayout_, kAllStages, 0, sizeof(push), push);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoLayout_, 1, 1, &aoSets_[frameIndex_ * 2], 0,
-                                nullptr);
-        vkCmdDispatch(cmd, gx, gy, 1);
+        {
+            ScopedCmdLabel l(cmd, "SSAO Compute (ao.comp)", DebugColors::Transfer);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoLayout_, 1, 1, &aoSets_[frameIndex_ * 2], 0,
+                                    nullptr);
+            vkCmdDispatch(cmd, gx, gy, 1);
+        }
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoBlurPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoLayout_, 1, 1, &aoSets_[frameIndex_ * 2 + 1],
-                                0, nullptr);
-        vkCmdDispatch(cmd, gx, gy, 1);
+        {
+            ScopedCmdLabel l(cmd, "SSAO Blur (ao_blur.comp)", DebugColors::Transfer);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoBlurPipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoLayout_, 1, 1, &aoSets_[frameIndex_ * 2 + 1],
+                                    0, nullptr);
+            vkCmdDispatch(cmd, gx, gy, 1);
+        }
         // The next frame's scene shading samples the result.
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
@@ -1647,7 +1865,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 
     // 5. Temporal anti-aliasing resolve into this frame slot's history image.
     if (taaEnabled_) {
-        ScopedCmdLabel label(cmd, "TAA Resolve", DebugColors::RenderPass);
+        ScopedCmdLabel label(cmd, "TAA Resolve (fullscreen.vert + taa.frag)", DebugColors::RenderPass);
         GpuImage& out = taaOutput_[frameIndex_];
         imageBarrier(cmd, out.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1681,7 +1899,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 
     // 6. Auto exposure.
     {
-        ScopedCmdLabel label(cmd, "Auto Exposure", DebugColors::Transfer);
+        ScopedCmdLabel label(cmd, "Auto Exposure (exposure.comp)", DebugColors::Transfer);
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, exposurePipeline_);
@@ -1692,7 +1910,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 
     // 7. Bloom: progressive downsample then additive upsample.
     {
-        ScopedCmdLabel label(cmd, "Bloom", DebugColors::RenderPass);
+        ScopedCmdLabel label(cmd, "Bloom (bloom_down.frag + bloom_up.frag)", DebugColors::RenderPass);
         auto beginPass = [&](uint32_t mip, bool load) {
             VkRenderingAttachmentInfo a{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
             a.imageView = bloomViews_[mip];
@@ -1761,7 +1979,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 
     // 8. Tone map into the swapchain image (with pre-rotation).
     {
-        ScopedCmdLabel label(cmd, "Tonemap + Present", DebugColors::RenderPass);
+        ScopedCmdLabel label(cmd, "Tonemap + Present (fullscreen.vert + tonemap.frag)", DebugColors::RenderPass);
         VkImage image = swapchainImages_[imageIndex];
         imageBarrier(cmd, image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
@@ -1791,6 +2009,32 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
     }
 }
 
+void Renderer::applyGraphicsSettings(const GraphicsSettings& s) {
+    float newScale = std::clamp(s.renderScale, 0.40f, 1.0f);
+    if (std::fabs(newScale - renderScale_) > 0.005f || s.taaEnabled != taaEnabled_) {
+        renderScale_ = newScale;
+        taaEnabled_ = s.taaEnabled;
+        renderTargetsDirty_ = true;
+    }
+    uint32_t newShadowSize = (s.shadowSize <= 2048) ? 2048 : ((s.shadowSize <= 4096) ? 4096 : 8192);
+    if (newShadowSize != shadowSize_) {
+        shadowSize_ = newShadowSize;
+        shadowMapDirtySize_ = true;
+    }
+    minClusterPixels_ = std::clamp(s.minClusterPixels, 0.05f, 4.0f);
+    bloomScale_ = std::clamp(s.bloomScale, 0.0f, 2.5f);
+    aoIntensityScale_ = std::clamp(s.aoIntensityScale, 0.0f, 2.5f);
+    ssrEnabled_ = s.ssrEnabled;
+    contactShadowsEnabled_ = s.contactShadowsEnabled;
+    volumetricFogEnabled_ = s.volumetricFogEnabled;
+    if (aoEnabled_ != s.aoEnabled) {
+        aoEnabled_ = s.aoEnabled;
+        if (!aoEnabled_) aoValid_ = false;
+    }
+    shadowPcfEnabled_ = s.shadowPcfEnabled;
+    occlusionCulling_ = s.occlusionCulling;
+}
+
 void Renderer::drawFrame(double timeSeconds, double dtSeconds) {
     if (!initialized_ || !swapchain_) return;
 
@@ -1809,6 +2053,25 @@ void Renderer::drawFrame(double timeSeconds, double dtSeconds) {
         vkDeviceWaitIdle(ctx_.device);
         destroySwapchain();
         if (!createSwapchain()) return;
+        renderTargetsDirty_ = false;
+    } else if (renderTargetsDirty_) {
+        vkDeviceWaitIdle(ctx_.device);
+        destroyRenderTargets();
+        if (!createRenderTargets()) return;
+        renderTargetsDirty_ = false;
+    }
+    if (shadowMapDirtySize_) {
+        shadowMapDirtySize_ = false;
+        if (scene_.loaded()) {
+            vkDeviceWaitIdle(ctx_.device);
+            ctx_.destroyImage(shadowMap_);
+            ctx_.destroyBuffer(shadowDraws_);
+            shadowReady_ = false;
+            if (!buildShadowMap()) {
+                initFailed_ = true;
+                return;
+            }
+        }
     }
 
     FrameResources& frame = frames_[frameIndex_];
@@ -1838,14 +2101,21 @@ void Renderer::drawFrame(double timeSeconds, double dtSeconds) {
         vkCmdResetQueryPool(cmd, timestampPool_, frameIndex_ * 2, 2);
         vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, timestampPool_, frameIndex_ * 2);
     }
-    {
-        ScopedCmdLabel frameLabel(cmd, sceneReady ? "Bistro Frame" : "Loading Frame", DebugColors::Frame);
-        if (sceneReady) {
-            updateUniforms(frame, timeSeconds, dtSeconds);
-            recordScene(cmd, frame, imageIndex);
-        } else {
-            recordLoading(cmd, imageIndex, timeSeconds);
+    if (sceneReady) {
+        updateUniforms(frame, timeSeconds, dtSeconds);
+        std::string frameName = "Frame [" + currentAssetDir_;
+        if (!stats_.cameraSegmentName.empty()) {
+            frameName += " - " + stats_.cameraSegmentName;
         }
+        frameName += "]";
+        ScopedCmdLabel frameLabel(cmd, frameName.c_str(), DebugColors::Frame);
+        recordScene(cmd, frame, imageIndex);
+    } else {
+        std::string loadName = currentAssetDir_.empty()
+                                   ? "Loading Frame"
+                                   : ("Loading Frame [" + currentAssetDir_ + " - " + scene_.status() + "]");
+        ScopedCmdLabel frameLabel(cmd, loadName.c_str(), DebugColors::Frame);
+        recordLoading(cmd, imageIndex, timeSeconds);
     }
     if (timestampPool_) {
         vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, timestampPool_, frameIndex_ * 2 + 1);

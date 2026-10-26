@@ -32,6 +32,8 @@ public:
     [[nodiscard]] float segmentDuration(int segment) const;
     [[nodiscard]] float segmentStartTime(int segment) const;
     [[nodiscard]] const std::string& loopName(int segment) const;
+    [[nodiscard]] bool loopLightBounds(int segment, const Mat4& lightView, float lookAheadDist, float outMin[2],
+                                       float outMax[2]) const;
 
 private:
     struct Loop {

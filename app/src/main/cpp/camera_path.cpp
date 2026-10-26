@@ -283,6 +283,34 @@ const std::string& CameraPath::loopName(int segment) const {
     return loops_[segment].name;
 }
 
+bool CameraPath::loopLightBounds(int segment, const Mat4& lightView, float lookAheadDist, float outMin[2],
+                                 float outMax[2]) const {
+    if (segment < 0 || segment >= static_cast<int>(loops_.size())) return false;
+    const Loop& loop = loops_[segment];
+    if (loop.samplePosition.empty()) return false;
+
+    outMin[0] = outMin[1] = 1e30f;
+    outMax[0] = outMax[1] = -1e30f;
+    auto accum = [&](const Vec3& p) {
+        Vec4 v = lightView * Vec4{p.x, p.y, p.z, 1.0f};
+        outMin[0] = std::min(outMin[0], v.x);
+        outMax[0] = std::max(outMax[0], v.x);
+        outMin[1] = std::min(outMin[1], v.y);
+        outMax[1] = std::max(outMax[1], v.y);
+    };
+
+    const size_t n = std::min(loop.samplePosition.size(), loop.sampleTarget.size());
+    for (size_t i = 0; i < n; ++i) {
+        const Vec3& eye = loop.samplePosition[i];
+        const Vec3& tgt = loop.sampleTarget[i];
+        Vec3 fwd = normalize(tgt - eye);
+        accum(eye);
+        accum(tgt);
+        accum(eye + fwd * lookAheadDist);
+    }
+    return outMin[0] <= outMax[0] && outMin[1] <= outMax[1];
+}
+
 CameraPath::Pose CameraPath::evaluate(double timeSeconds) const {
     if (loops_.empty()) return Pose{};
     double total = static_cast<double>(loopDuration());
