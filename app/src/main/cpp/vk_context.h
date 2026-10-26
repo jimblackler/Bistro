@@ -49,14 +49,14 @@ public:
     bool createImage(const ImageDesc& desc, GpuImage& out);
     void destroyImage(GpuImage& img);
     VkImageView createView(VkImage image, VkFormat format, VkImageAspectFlags aspect, uint32_t baseMip,
-                           uint32_t mipCount);
+                           uint32_t mipCount, const char* name = nullptr);
 
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props, bool* found = nullptr) const;
     bool isFormatSupported(VkFormat format, VkFormatFeatureFlags features) const;
-    VkShaderModule createShaderModule(const uint32_t* code, size_t size) const;
+    VkShaderModule createShaderModule(const uint32_t* code, size_t size, const char* name = nullptr) const;
 
     // Synchronous single-use command buffers.
-    VkCommandBuffer beginOneShot();
+    VkCommandBuffer beginOneShot(const char* name = "One-Shot Command Buffer");
     void endOneShot(VkCommandBuffer cmd);
 
     // Staged uploads. Data is copied into a persistent staging buffer and flushed in batches.

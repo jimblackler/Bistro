@@ -140,6 +140,9 @@ bool VulkanContext::init() {
     std::vector<VkExtensionProperties> devExts(count);
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count, devExts.data());
     std::vector<const char*> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    if (hasExtension(devExts, VK_EXT_DEBUG_MARKER_EXTENSION_NAME)) {
+        deviceExtensions.push_back(VK_EXT_DEBUG_MARKER_EXTENSION_NAME);
+    }
 
     float priority = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -161,6 +164,9 @@ bool VulkanContext::init() {
     vkGetDeviceQueue(device, queueFamily, 0, &queue);
 
     VulkanDebug::init(instance, device);
+    VulkanDebug::setObjectName(device, instance, VK_OBJECT_TYPE_INSTANCE, "Bistro Vulkan 1.3 Instance");
+    VulkanDebug::setObjectName(device, physicalDevice, VK_OBJECT_TYPE_PHYSICAL_DEVICE, properties.deviceName);
+    VulkanDebug::setObjectName(device, device, VK_OBJECT_TYPE_DEVICE, properties.deviceName);
     VulkanDebug::setObjectName(device, queue, VK_OBJECT_TYPE_QUEUE, "Graphics+Compute Queue");
     return createUploadResources();
 }
@@ -170,8 +176,10 @@ bool VulkanContext::createUploadResources() {
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     pci.queueFamilyIndex = queueFamily;
     if (vkCreateCommandPool(device, &pci, nullptr, &oneShotPool_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(device, oneShotPool_, VK_OBJECT_TYPE_COMMAND_POOL, "One-Shot Upload Command Pool");
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateFence(device, &fci, nullptr, &oneShotFence_) != VK_SUCCESS) return false;
+    VulkanDebug::setObjectName(device, oneShotFence_, VK_OBJECT_TYPE_FENCE, "One-Shot Upload Fence");
     return createBuffer(kStagingSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging_,
                         "Upload Staging Buffer");
@@ -236,7 +244,8 @@ bool VulkanContext::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Vk
     if (props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) vkMapMemory(device, out.memory, 0, VK_WHOLE_SIZE, 0, &out.mapped);
     if (name) {
         VulkanDebug::setObjectName(device, out.buffer, VK_OBJECT_TYPE_BUFFER, name);
-        VulkanDebug::setObjectName(device, out.memory, VK_OBJECT_TYPE_DEVICE_MEMORY, name);
+        std::string memName = std::string(name) + " Memory";
+        VulkanDebug::setObjectName(device, out.memory, VK_OBJECT_TYPE_DEVICE_MEMORY, memName.c_str());
     }
     return true;
 }
@@ -248,7 +257,7 @@ void VulkanContext::destroyBuffer(GpuBuffer& b) {
 }
 
 VkImageView VulkanContext::createView(VkImage image, VkFormat format, VkImageAspectFlags aspect, uint32_t baseMip,
-                                      uint32_t mipCount) {
+                                      uint32_t mipCount, const char* name) {
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = image;
     vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -256,6 +265,9 @@ VkImageView VulkanContext::createView(VkImage image, VkFormat format, VkImageAsp
     vci.subresourceRange = {aspect, baseMip, mipCount, 0, 1};
     VkImageView view = VK_NULL_HANDLE;
     vkCreateImageView(device, &vci, nullptr, &view);
+    if (name && view != VK_NULL_HANDLE) {
+        VulkanDebug::setObjectName(device, view, VK_OBJECT_TYPE_IMAGE_VIEW, name);
+    }
     return view;
 }
 
@@ -293,14 +305,17 @@ bool VulkanContext::createImage(const ImageDesc& desc, GpuImage& out) {
     }
     if (!found) allocatedBytes += req.size;
     vkBindImageMemory(device, out.image, out.memory, 0);
-    out.view = createView(out.image, desc.format, desc.aspect, 0, desc.mipLevels);
+    std::string viewName = desc.name ? (std::string(desc.name) + " View") : std::string();
+    out.view = createView(out.image, desc.format, desc.aspect, 0, desc.mipLevels,
+                          desc.name ? viewName.c_str() : nullptr);
     out.format = desc.format;
     out.width = desc.width;
     out.height = desc.height;
     out.mipLevels = desc.mipLevels;
     if (desc.name) {
         VulkanDebug::setObjectName(device, out.image, VK_OBJECT_TYPE_IMAGE, desc.name);
-        VulkanDebug::setObjectName(device, out.view, VK_OBJECT_TYPE_IMAGE_VIEW, desc.name);
+        std::string memName = std::string(desc.name) + " Memory";
+        VulkanDebug::setObjectName(device, out.memory, VK_OBJECT_TYPE_DEVICE_MEMORY, memName.c_str());
     }
     return true;
 }
@@ -312,22 +327,29 @@ void VulkanContext::destroyImage(GpuImage& img) {
     img = GpuImage{};
 }
 
-VkShaderModule VulkanContext::createShaderModule(const uint32_t* code, size_t size) const {
+VkShaderModule VulkanContext::createShaderModule(const uint32_t* code, size_t size, const char* name) const {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = size;
     ci.pCode = code;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(device, &ci, nullptr, &m) != VK_SUCCESS) LOGE("vkCreateShaderModule failed");
+    if (vkCreateShaderModule(device, &ci, nullptr, &m) != VK_SUCCESS) {
+        LOGE("vkCreateShaderModule failed for %s", name ? name : "?");
+    } else if (name) {
+        VulkanDebug::setObjectName(device, m, VK_OBJECT_TYPE_SHADER_MODULE, name);
+    }
     return m;
 }
 
-VkCommandBuffer VulkanContext::beginOneShot() {
+VkCommandBuffer VulkanContext::beginOneShot(const char* name) {
     VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     ai.commandPool = oneShotPool_;
     ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
     VkCommandBuffer cmd;
     vkAllocateCommandBuffers(device, &ai, &cmd);
+    if (name) {
+        VulkanDebug::setObjectName(device, cmd, VK_OBJECT_TYPE_COMMAND_BUFFER, name);
+    }
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &bi);
@@ -358,8 +380,11 @@ void VulkanContext::flushUploads() {
         stagingHead_ = 0;
         return;
     }
-    VkCommandBuffer cmd = beginOneShot();
-    recordPendingCopies(cmd);
+    VkCommandBuffer cmd = beginOneShot("Staged Upload Command Buffer");
+    {
+        ScopedCmdLabel label(cmd, "Flush Staged Uploads", DebugColors::Transfer);
+        recordPendingCopies(cmd);
+    }
     endOneShot(cmd);
     stagingHead_ = 0;
 }

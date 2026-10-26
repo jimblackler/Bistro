@@ -53,17 +53,23 @@ double nowMs() {
 }
 
 void transitionForUpload(VulkanContext* ctx, const std::vector<GpuImage*>& images, bool toTransfer) {
-    VkCommandBuffer cmd = ctx->beginOneShot();
-    for (GpuImage* img : images) {
-        if (toTransfer) {
-            imageBarrier(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
-                         VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-        } else {
-            imageBarrier(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT,
-                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                         VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    VkCommandBuffer cmd = ctx->beginOneShot(
+        toTransfer ? "Texture Upload Pre-Transition Command Buffer" : "Texture Upload Post-Transition Command Buffer");
+    {
+        ScopedCmdLabel label(cmd,
+                             toTransfer ? "Transition Textures to Transfer Dst" : "Transition Textures to Shader Read",
+                             DebugColors::Transition);
+        for (GpuImage* img : images) {
+            if (toTransfer) {
+                imageBarrier(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            } else {
+                imageBarrier(cmd, img->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT,
+                             VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            }
         }
     }
     ctx->endOneShot(cmd);
@@ -173,7 +179,7 @@ bool Scene::loadStep() {
             while (nextTexture_ < textureRecords_.size() && nowMs() - start < 40.0) {
                 const auto& rec = textureRecords_[nextTexture_];
                 std::string path = assetDir_ + "/textures/" + rec.name + ".tex";
-                if (!loadTexture(path, textures[nextTexture_], rec.name)) {
+                if (!loadTexture(path, textures[nextTexture_], path.c_str())) {
                     LOGE("Texture %s failed to load; using fallback", rec.name);
                 }
                 nextTexture_++;
@@ -242,10 +248,12 @@ bool Scene::loadGeometry() {
 
     VkDeviceSize vbSize = static_cast<VkDeviceSize>(header.vertexCount) * sizeof(bistro::GpuVertex);
     VkDeviceSize ibSize = static_cast<VkDeviceSize>(header.indexCount) * sizeof(uint16_t);
+    std::string vbName = scenePath + " [Vertices]";
+    std::string ibName = scenePath + " [Indices]";
     if (!ctx_->createBuffer(vbSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, "Scene Vertex Buffer") ||
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vbName.c_str()) ||
         !ctx_->createBuffer(ibSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, "Scene Index Buffer")) {
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, ibName.c_str())) {
         return false;
     }
     ctx_->uploadBuffer(vertexBuffer, 0, vertexData, vbSize);
@@ -291,12 +299,14 @@ bool Scene::loadGeometry() {
         triangleCount += r.indexCount / 3;
     }
 
+    std::string cbName = scenePath + " [Clusters]";
+    std::string mbName = scenePath + " [Materials]";
     if (!ctx_->createBuffer(clusters.size() * sizeof(GpuCluster),
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, clusterBuffer, "Cluster Buffer") ||
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, clusterBuffer, cbName.c_str()) ||
         !ctx_->createBuffer(gpuMaterials.size() * sizeof(GpuMaterial),
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, materialBuffer, "Material Buffer")) {
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, materialBuffer, mbName.c_str())) {
         return false;
     }
     ctx_->uploadBuffer(clusterBuffer, 0, clusters.data(), clusters.size() * sizeof(GpuCluster));
@@ -319,12 +329,18 @@ bool Scene::createFallbackTextures() {
     };
     const VkFormat formats[4] = {VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM,
                                  VK_FORMAT_R8G8B8A8_SRGB};
+    const char* fallbackNames[4] = {
+        "Fallback BaseColor Texture (White)",
+        "Fallback Normal Texture (Flat)",
+        "Fallback ORM Texture (Neutral)",
+        "Fallback Emissive Texture (Black)",
+    };
     std::vector<GpuImage*> images;
     for (int i = 0; i < 4; ++i) {
         ImageDesc d;
         d.format = formats[i];
         d.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        d.name = "Fallback Texture";
+        d.name = fallbackNames[i];
         if (!ctx_->createImage(d, textures[fallbackBase_ + i])) return false;
         images.push_back(&textures[fallbackBase_ + i]);
     }
@@ -364,7 +380,7 @@ bool Scene::loadTexture(const std::string& path, GpuImage& out, const char* debu
     d.mipLevels = mipCount;
     d.format = format;
     d.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    d.name = debugName;
+    d.name = debugName ? debugName : path.c_str();
     if (!ctx_->createImage(d, out)) return false;
 
     transitionForUpload(ctx_, {&out}, true);
@@ -383,8 +399,12 @@ bool Scene::loadTexture(const std::string& path, GpuImage& out, const char* debu
 }
 
 bool Scene::loadEnvironment() {
-    if (!loadTexture(assetDir_ + "/sky.tex", sky, "Sky Equirect") ||
-        !loadTexture(assetDir_ + "/env_specular.tex", envSpecular, "Prefiltered Specular Environment")) {
+    std::string skyPath = assetDir_ + "/sky.tex";
+    std::string specPath = assetDir_ + "/env_specular.tex";
+    std::string skyName = skyPath + " (Sky Equirect)";
+    std::string specName = specPath + " (Prefiltered Specular Environment)";
+    if (!loadTexture(skyPath, sky, skyName.c_str()) ||
+        !loadTexture(specPath, envSpecular, specName.c_str())) {
         return false;
     }
     AssetFile file(assets_, assetDir_ + "/environment.bin");
