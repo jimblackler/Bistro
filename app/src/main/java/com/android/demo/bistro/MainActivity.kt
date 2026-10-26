@@ -72,10 +72,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         var aoIntensityScale: Float = 1.0f,
         var ssrEnabled: Boolean = true,
         var contactShadowsEnabled: Boolean = true,
-        var volumetricFogEnabled: Boolean = true,
+        var volumetricFogEnabled: Boolean = false,
         var aoEnabled: Boolean = true,
         var shadowPcfEnabled: Boolean = true,
-        var taaEnabled: Boolean = true,
+        var taaEnabled: Boolean = false,
         var occlusionCulling: Boolean = true
     )
 
@@ -429,7 +429,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 gfx.volumetricFogEnabled = false
                 gfx.aoEnabled = false
                 gfx.shadowPcfEnabled = false
-                gfx.taaEnabled = true
+                gfx.taaEnabled = false
                 gfx.occlusionCulling = true
             }
             "medium" -> {
@@ -443,21 +443,21 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 gfx.volumetricFogEnabled = false
                 gfx.aoEnabled = true
                 gfx.shadowPcfEnabled = true
-                gfx.taaEnabled = true
+                gfx.taaEnabled = false
                 gfx.occlusionCulling = true
             }
             "high" -> {
-                gfx.renderScale = 0.85f
-                gfx.shadowSize = 4096
-                gfx.minClusterPixels = 0.30f
+                gfx.renderScale = 1.0f
+                gfx.shadowSize = 8192
+                gfx.minClusterPixels = 0.20f
                 gfx.bloomScale = 1.0f
                 gfx.aoIntensityScale = 1.0f
                 gfx.ssrEnabled = true
                 gfx.contactShadowsEnabled = true
-                gfx.volumetricFogEnabled = true
+                gfx.volumetricFogEnabled = false
                 gfx.aoEnabled = true
                 gfx.shadowPcfEnabled = true
-                gfx.taaEnabled = true
+                gfx.taaEnabled = false
                 gfx.occlusionCulling = true
             }
             else -> {
@@ -485,20 +485,20 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             gfx.contactShadowsEnabled && gfx.volumetricFogEnabled && gfx.aoEnabled &&
             gfx.shadowPcfEnabled && gfx.taaEnabled && gfx.occlusionCulling
         ) return "ultra"
-        if (abs(gfx.renderScale - 0.85f) < 0.02f && gfx.shadowSize == 4096 &&
-            abs(gfx.minClusterPixels - 0.30f) < 0.05f && gfx.ssrEnabled &&
-            gfx.contactShadowsEnabled && gfx.volumetricFogEnabled && gfx.aoEnabled &&
-            gfx.shadowPcfEnabled && gfx.taaEnabled && gfx.occlusionCulling
+        if (abs(gfx.renderScale - 1.0f) < 0.02f && gfx.shadowSize == 8192 &&
+            abs(gfx.minClusterPixels - 0.20f) < 0.05f && gfx.ssrEnabled &&
+            gfx.contactShadowsEnabled && !gfx.volumetricFogEnabled && gfx.aoEnabled &&
+            gfx.shadowPcfEnabled && !gfx.taaEnabled && gfx.occlusionCulling
         ) return "high"
         if (abs(gfx.renderScale - 0.75f) < 0.02f && gfx.shadowSize == 4096 &&
             abs(gfx.minClusterPixels - 0.60f) < 0.05f && !gfx.ssrEnabled &&
             gfx.contactShadowsEnabled && !gfx.volumetricFogEnabled && gfx.aoEnabled &&
-            gfx.shadowPcfEnabled && gfx.taaEnabled && gfx.occlusionCulling
+            gfx.shadowPcfEnabled && !gfx.taaEnabled && gfx.occlusionCulling
         ) return "medium"
         if (abs(gfx.renderScale - 0.60f) < 0.02f && gfx.shadowSize == 2048 &&
             abs(gfx.minClusterPixels - 1.50f) < 0.05f && !gfx.ssrEnabled &&
             !gfx.contactShadowsEnabled && !gfx.volumetricFogEnabled && !gfx.aoEnabled &&
-            !gfx.shadowPcfEnabled && gfx.taaEnabled && gfx.occlusionCulling
+            !gfx.shadowPcfEnabled && !gfx.taaEnabled && gfx.occlusionCulling
         ) return "low"
         return ""
     }

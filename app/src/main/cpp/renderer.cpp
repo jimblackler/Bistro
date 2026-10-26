@@ -510,7 +510,7 @@ bool Renderer::createGlobalResources() {
     msaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     if (debugProperty("debug.bistro.msaa", 1.0f) >= 4.0f && (counts & VK_SAMPLE_COUNT_4_BIT))
         msaaSamples_ = VK_SAMPLE_COUNT_4_BIT;
-    taaEnabled_ = msaaSamples_ == VK_SAMPLE_COUNT_1_BIT && debugProperty("debug.bistro.taa", 1.0f) > 0.5f;
+    taaEnabled_ = msaaSamples_ == VK_SAMPLE_COUNT_1_BIT && debugProperty("debug.bistro.taa", 0.0f) > 0.5f;
     // SSAO reads the single-sample depth, which the MSAA path only resolves when building Hi-Z.
     if (msaaSamples_ != VK_SAMPLE_COUNT_1_BIT && !buildHiz_) aoEnabled_ = false;
     LOGI("HDR format %d, depth format %d, MSAA x%d", hdrFormat_, depthFormat_, msaaSamples_);
@@ -931,16 +931,14 @@ bool Renderer::createRenderTargets() {
     d.name = "Scene Depth";
     if (!ctx_.createImage(d, depthResolve_)) return false;
 
-    if (taaEnabled_) {
-        for (uint32_t i = 0; i < kFramesInFlight; ++i) {
-            ImageDesc t;
-            t.width = renderExtent_.width;
-            t.height = renderExtent_.height;
-            t.format = hdrFormat_;
-            t.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-            t.name = i == 0 ? "TAA History [Frame 0]" : "TAA History [Frame 1]";
-            if (!ctx_.createImage(t, taaOutput_[i])) return false;
-        }
+    for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+        ImageDesc t;
+        t.width = renderExtent_.width;
+        t.height = renderExtent_.height;
+        t.format = hdrFormat_;
+        t.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        t.name = i == 0 ? "TAA History [Frame 0]" : "TAA History [Frame 1]";
+        if (!ctx_.createImage(t, taaOutput_[i])) return false;
     }
     taaHistoryValid_ = false;
 
@@ -973,12 +971,10 @@ bool Renderer::createRenderTargets() {
             imageBarrier(cmd, hiz_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                          VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                          VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-            if (taaEnabled_) {
-                for (uint32_t i = 0; i < kFramesInFlight; ++i) {
-                    imageBarrier(cmd, taaOutput_[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
-                                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-                }
+            for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+                imageBarrier(cmd, taaOutput_[i].image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, 0,
+                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
             }
         }
         ctx_.endOneShot(cmd);
@@ -1049,34 +1045,29 @@ void Renderer::writeRenderTargetDescriptors() {
     VkDescriptorImageInfo hdrInfo{linearClampSampler_, hdrResolve_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo bloomInfo{linearClampSampler_, bloomViews_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo hizInfo{nearestSampler_, hiz_.view, VK_IMAGE_LAYOUT_GENERAL};
-    // With TAA, post-processing in frame slot i reads that slot's TAA output, while SSR during the
-    // main pass reads the previous frame's TAA output ((i + 1) % kFramesInFlight).
+    // Post-processing in frame slot i reads taaOutput_[i] (written either by the TAA resolve pass or
+    // directly by the main pass when TAA is off), while SSR during the main pass reads the previous
+    // frame's HDR buffer taaOutput_[(i + 1) % kFramesInFlight].
     std::array<VkDescriptorImageInfo, kFramesInFlight> postInputs{};
     std::array<VkDescriptorImageInfo, kFramesInFlight> prevHdrInputs{};
     for (uint32_t i = 0; i < kFramesInFlight; ++i) {
-        postInputs[i] = taaEnabled_ ? VkDescriptorImageInfo{linearClampSampler_, taaOutput_[i].view,
-                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
-                                    : hdrInfo;
-        prevHdrInputs[i] = taaEnabled_ ? VkDescriptorImageInfo{linearClampSampler_,
-                                                               taaOutput_[(i + 1) % kFramesInFlight].view,
-                                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
-                                       : bloomInfo;
+        postInputs[i] = {linearClampSampler_, taaOutput_[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        prevHdrInputs[i] = {linearClampSampler_, taaOutput_[(i + 1) % kFramesInFlight].view,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     }
     std::array<VkDescriptorImageInfo, 3 * kFramesInFlight> taaInfos{};
-    if (taaEnabled_) {
-        for (uint32_t i = 0; i < kFramesInFlight; ++i) {
-            taaInfos[i * 3 + 0] = hdrInfo;
-            taaInfos[i * 3 + 1] = {linearClampSampler_, taaOutput_[(i + 1) % kFramesInFlight].view,
-                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            taaInfos[i * 3 + 2] = {nearestSampler_, depthResolve_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w.dstSet = taaSets_[i];
-            w.dstBinding = 0;
-            w.descriptorCount = 3;
-            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            w.pImageInfo = &taaInfos[i * 3];
-            writes.push_back(w);
-        }
+    for (uint32_t i = 0; i < kFramesInFlight; ++i) {
+        taaInfos[i * 3 + 0] = hdrInfo;
+        taaInfos[i * 3 + 1] = {linearClampSampler_, taaOutput_[(i + 1) % kFramesInFlight].view,
+                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        taaInfos[i * 3 + 2] = {nearestSampler_, depthResolve_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = taaSets_[i];
+        w.dstBinding = 0;
+        w.descriptorCount = 3;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &taaInfos[i * 3];
+        writes.push_back(w);
     }
     for (uint32_t fi = 0; fi < kFramesInFlight; ++fi) {
         FrameResources& f = frames_[fi];
@@ -1710,7 +1701,8 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                              VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
         }
-        imageBarrier(cmd, hdrResolve_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+        GpuImage& mainColorTarget = taaEnabled_ ? hdrResolve_ : taaOutput_[frameIndex_];
+        imageBarrier(cmd, mainColorTarget.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -1730,10 +1722,10 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
             color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             color.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
             color.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-            color.resolveImageView = hdrResolve_.view;
+            color.resolveImageView = mainColorTarget.view;
             color.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         } else {
-            color.imageView = hdrResolve_.view;
+            color.imageView = mainColorTarget.view;
             color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         }
@@ -1787,11 +1779,14 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
                                           capacity, sizeof(DrawCommand));
         }
         vkCmdEndRendering(cmd);
-        imageBarrier(cmd, hdrResolve_.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        imageBarrier(cmd, mainColorTarget.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        if (!taaEnabled_) {
+            taaHistoryValid_ = true;
+        }
         imageBarrier(cmd, depthResolve_.image, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
@@ -1936,8 +1931,7 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, i,
                          1);
             beginPass(i, false);
-            VkDescriptorSet srcSet =
-                i == 0 ? bloomSourceSets_[taaEnabled_ ? frameIndex_ : 0] : bloomSourceSets_[i + 1];
+            VkDescriptorSet srcSet = i == 0 ? bloomSourceSets_[frameIndex_] : bloomSourceSets_[i + 1];
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, postLayout_, 1, 1, &srcSet, 0, nullptr);
             BloomPush p{};
             VkExtent2D src = i == 0 ? renderExtent_ : bloomExtents_[i - 1];
@@ -2011,10 +2005,13 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 
 void Renderer::applyGraphicsSettings(const GraphicsSettings& s) {
     float newScale = std::clamp(s.renderScale, 0.40f, 1.0f);
-    if (std::fabs(newScale - renderScale_) > 0.005f || s.taaEnabled != taaEnabled_) {
+    if (std::fabs(newScale - renderScale_) > 0.005f) {
         renderScale_ = newScale;
-        taaEnabled_ = s.taaEnabled;
         renderTargetsDirty_ = true;
+    }
+    if (s.taaEnabled != taaEnabled_) {
+        taaEnabled_ = s.taaEnabled;
+        taaHistoryValid_ = false;
     }
     uint32_t newShadowSize = (s.shadowSize <= 2048) ? 2048 : ((s.shadowSize <= 4096) ? 4096 : 8192);
     if (newShadowSize != shadowSize_) {

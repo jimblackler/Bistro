@@ -29,10 +29,10 @@ struct GraphicsSettings {
     float aoIntensityScale = 1.0f;      // [0.00, 2.00] multiplier on environment aoIntensity
     bool ssrEnabled = true;
     bool contactShadowsEnabled = true;
-    bool volumetricFogEnabled = true;
+    bool volumetricFogEnabled = false;
     bool aoEnabled = true;
     bool shadowPcfEnabled = true;
-    bool taaEnabled = true;
+    bool taaEnabled = false;
     bool occlusionCulling = true;
 };
 
@@ -171,7 +171,7 @@ private:
     GpuImage bloom_;
     GpuImage depthResolve_;  // single-sample depth (the depth attachment itself without MSAA)
     std::array<GpuImage, kFramesInFlight> taaOutput_;  // TAA output / history ping-pong
-    bool taaEnabled_ = true;
+    bool taaEnabled_ = false;
     bool taaHistoryValid_ = false;
     uint32_t jitterIndex_ = 0;
     Mat4 prevViewProjJittered_ = Mat4::identity();
@@ -192,7 +192,7 @@ private:
     bool aoValid_ = false;
     bool ssrEnabled_ = true;
     bool contactShadowsEnabled_ = true;
-    bool volumetricFogEnabled_ = true;
+    bool volumetricFogEnabled_ = false;
     bool shadowPcfEnabled_ = true;
     float minClusterPixels_ = 0.20f;
     float bloomScale_ = 1.0f;
