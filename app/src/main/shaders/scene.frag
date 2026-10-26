@@ -327,13 +327,14 @@ void main() {
     vec2 dNxydx = dFdx(nxy);
     vec2 dNxydy = dFdy(nxy);
 
+    bool alphaDiscarded = false;
     if (ALPHA_MODE == 1u) {
         if (ALPHA_TO_COVERAGE) {
             // Sharpen alpha around the cutoff so alpha-to-coverage produces crisp, anti-aliased edges.
             base.a = (base.a - m.alphaCutoff) / max(fwidth(base.a), 1e-4) + 0.5;
-            if (base.a <= 0.0) discard;
-        } else if (base.a < m.alphaCutoff) {
-            discard;
+            alphaDiscarded = (base.a <= 0.0);
+        } else {
+            alphaDiscarded = (base.a < m.alphaCutoff);
         }
     }
 
@@ -653,6 +654,11 @@ void main() {
         vec3 shaftContrib = sunShafts / (1.0 + luminance(color) * 0.25);
         color = color * fogTransmittance + fogInscatter + shaftContrib;
         if (frame.aoParams.w > 0.5) color = vec3(ao * 0.5);  // `debug.bistro.aodebug`: screen-space AO only
+        // Defer OpTerminateInvocation (`discard`) until after all non-uniform descriptor waterfall loops
+        // and divergent lighting branches so PowerVR USC SIMD wave execution masks are never corrupted.
+        if (ALPHA_MODE == 1u && alphaDiscarded) {
+            discard;
+        }
         outColor = vec4(color, ALPHA_MODE == 1u ? base.a : 1.0);
     }
 }
