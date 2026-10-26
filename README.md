@@ -10,15 +10,19 @@ See [ATTRIBUTION.md](ATTRIBUTION.md) for asset credits and licences (CC BY 4.0 /
 
 All environments are defined declaratively in `environments/<id>/environment.json` and compiled offline into `app/src/main/assets/environments/<id>/`:
 
-1. **Amazon Lumberyard Bistro (`bistro`)** — *Parisian Street & Restaurant Interior*
-   - Merges `BistroExterior.fbx` and `BistroInterior.fbx` (~3.9M triangles, ~6.4k spatial clusters) with `san_giuseppe_bridge_4k.hdr` image-based lighting.
-   - Alternates between a street-level **Exterior** tour along the boulevard (~181 s) and a close-up **Restaurant Interior** tour through the dining room, wine alcove, and zinc bar counter (~49 s).
-2. **Beeple Zero-Day (`beeple`)** — *Measure Seven · Mechanical Music Room*
-   - Renders `MEASURE_SEVEN_COLORED_LIGHTS.fbx` from the NVIDIA ORCA Beeple Zero-Day archive with procedural multi-lobe studio HDR lighting, coloured cyan/amber point lights, and emissive light panels.
-3. **Intel Sponza (`sponza`)** — *Atrium · Curtains, Ivy & Cypress*
-   - Combines Intel GPU Research Samples' updated Sponza (`NewSponza_Main_glTF_003.gltf`, `NewSponza_Curtains_glTF.gltf`, `NewSponza_IvyGrowth_glTF.gltf`, and `NewSponza_CypressTree_glTF.gltf`) with 22 warm colonnade/gallery point lights and `kloppenheim_05_4k.hdr` IBL across a two-tier atrium and upper gallery fly-through.
-4. **Jungle Ruins (`jungle`)** — *Mayan Pyramid · Banyan & River Clearing*
-   - Assembles Intel GPU Research Samples' `JungleRuins` USD scene (via `tools/build_jungle_gltf.py`) with `kloppenheim_06_puresky_8k.hdr` sky/IBL along a river clearing, banyan tree, and pyramid temple fly-through.
+1. **[Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) (`bistro`)** — *Parisian Street & Restaurant Interior*
+   - Merges `BistroExterior.fbx` and `BistroInterior.fbx` from the [NVIDIA ORCA Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) archive (~3.9M triangles, ~6.4k spatial clusters) with [`san_giuseppe_bridge_4k.hdr`](https://polyhaven.com/a/san_giuseppe_bridge) image-based lighting.
+   - Alternates between a street-level **Exterior** tour along the boulevard (~90 s) and a close-up **Restaurant Interior** tour through the dining room, wine alcove, and zinc bar counter (~46 s).
+   - **License**: [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/) — see the [NVIDIA ORCA Bistro page](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) and bundled [`LICENSE.txt`](app/src/main/assets/environments/bistro/LICENSE.txt); HDR sky map licensed [CC0 (Poly Haven)](https://polyhaven.com/license).
+2. **[Beeple Zero-Day](https://developer.nvidia.com/orca/beeple-zero-day) (`beeple`)** — *Measure Seven · Mechanical Music Room*
+   - Renders `MEASURE_SEVEN_COLORED_LIGHTS.fbx` from the [NVIDIA ORCA Beeple Zero-Day](https://developer.nvidia.com/orca/beeple-zero-day) archive with procedural multi-lobe studio HDR lighting, coloured cyan/amber point lights, and emissive light panels.
+   - **License**: [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/) — by Mike Winkelmann (Beeple) and Kate Anderson; see the [NVIDIA ORCA Beeple Zero-Day page](https://developer.nvidia.com/orca/beeple-zero-day) and bundled [`LICENSE.txt`](app/src/main/assets/environments/beeple/LICENSE.txt).
+3. **[Intel Sponza](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) (`sponza`)** — *Atrium · Curtains, Ivy & Cypress*
+   - Combines [Intel GPU Research Samples'](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) updated Sponza (`NewSponza_Main_glTF_003.gltf`, `NewSponza_Curtains_glTF.gltf`, `NewSponza_IvyGrowth_glTF.gltf`, and `NewSponza_CypressTree_glTF.gltf`) with 22 warm colonnade/gallery point lights and [`kloppenheim_05_4k.hdr`](https://polyhaven.com/a/kloppenheim_05) IBL across a two-tier atrium and upper gallery fly-through.
+   - **License**: [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/) — commissioned by Frank Meinl and sponsored by Anton Kaplanyan (with the Sponza Addon Package Crew); see the [Intel GPU Research Samples library](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) and bundled [`LICENSE.txt`](app/src/main/assets/environments/sponza/LICENSE.txt); HDR sky map licensed [CC0 (Poly Haven)](https://polyhaven.com/license).
+4. **[Jungle Ruins](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) (`jungle`)** — *Mayan Pyramid · Banyan & River Clearing*
+   - Assembles [Intel GPU Research Samples'](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) `JungleRuins` USD scene (via `tools/build_jungle_gltf.py`) with [`kloppenheim_06_puresky_8k.hdr`](https://polyhaven.com/a/kloppenheim_06_puresky) sky/IBL along a river clearing, banyan tree, and pyramid temple fly-through.
+   - **License**: [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/) — created by Cristiano Siqueira, Charlene Teets, Sebastian Herholz, Anton Sochenov, and Anton Kaplanyan; see the [Intel GPU Research Samples library](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-processing-research/samples.html) and bundled [`LICENSE.txt`](app/src/main/assets/environments/jungle/LICENSE.txt); HDR sky map licensed [CC0 (Poly Haven)](https://polyhaven.com/license).
 
 ---
 
