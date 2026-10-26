@@ -91,6 +91,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var nextEnvButton: View
     private lateinit var graphicsPanelContainer: View
     private lateinit var graphicsPanelContent: LinearLayout
+    private lateinit var surfaceView: SurfaceView
 
     private val handler = Handler(Looper.getMainLooper())
     private val environments = mutableListOf<EnvironmentEntry>()
@@ -102,6 +103,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var suppressSeekBarCallbacks = false
     private var freezeButtonView: TextView? = null
     private val presetButtonViews = mutableListOf<Pair<String, TextView>>()
+    private val resolutionButtonViews = mutableListOf<Pair<Float, TextView>>()
     private val shadowSizeButtonViews = mutableListOf<Pair<Int, TextView>>()
     private val toggleChipViews = mutableListOf< Triple<TextView, String, () -> Boolean> >()
     private var scaleLabelView: TextView? = null
@@ -210,7 +212,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             }
         }
 
-        val surfaceView = findViewById<SurfaceView>(R.id.surface_view)
+        surfaceView = findViewById(R.id.surface_view)
         surfaceView.holder.addCallback(this)
         surfaceView.setOnClickListener {
             if (graphicsPanelContainer.isVisible()) {
@@ -520,10 +522,31 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         )
     }
 
+    private fun currentLogicalSize(): Pair<Int, Int> {
+        val dm = resources.displayMetrics
+        val w = if (::surfaceView.isInitialized && surfaceView.width > 0) surfaceView.width else maxOf(dm.widthPixels, dm.heightPixels)
+        val h = if (::surfaceView.isInitialized && surfaceView.height > 0) surfaceView.height else minOf(dm.widthPixels, dm.heightPixels)
+        return maxOf(w, h) to minOf(w, h)
+    }
+
+    private fun scaledResolution(scale: Float): Pair<Int, Int> {
+        val (lw, lh) = currentLogicalSize()
+        val rw = maxOf(16, (lw * scale).roundToInt() and 1.inv())
+        val rh = maxOf(16, (lh * scale).roundToInt() and 1.inv())
+        return rw to rh
+    }
+
+    private fun formatResolutionLabel(scale: Float): String {
+        val (rw, rh) = scaledResolution(scale)
+        val pct = (scale * 100f).roundToInt()
+        return String.format(Locale.US, "Screen Resolution: %d×%d (%d%%)", rw, rh, pct)
+    }
+
     @SuppressLint("SetTextI18n")
     private fun buildGraphicsPanel() {
         graphicsPanelContent.removeAllViews()
         presetButtonViews.clear()
+        resolutionButtonViews.clear()
         shadowSizeButtonViews.clear()
         toggleChipViews.clear()
 
@@ -607,18 +630,53 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         graphicsPanelContent.addView(presetRow)
 
-        // 3. Render Resolution Scale slider (50% .. 100%, step 5%)
-        scaleLabelView = addSectionLabel("Render Scale: 100%")
+        // 3. Screen Resolution quick-select buttons (540p, 720p, 900p, 1080p) + slider (35% .. 100%)
+        scaleLabelView = addSectionLabel(formatResolutionLabel(gfx.renderScale))
+        val (_, nativeH) = currentLogicalSize()
+        val baseH = if (nativeH > 0) nativeH.toFloat() else 1080f
+        val resOptions = listOf(
+            (540f / baseH).coerceIn(0.35f, 1.0f) to "540p",
+            (720f / baseH).coerceIn(0.35f, 1.0f) to "720p",
+            (900f / baseH).coerceIn(0.35f, 1.0f) to "900p",
+            1.0f to "${nativeH}p"
+        )
+        val resRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, dp(2))
+        }
+        for ((idx, pair) in resOptions.withIndex()) {
+            val (targetScale, label) = pair
+            val btn = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setPadding(0, dp(5), 0, dp(5))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTypeface(typeface, Typeface.BOLD)
+                setOnClickListener {
+                    gfx.renderScale = targetScale
+                    pushGraphicsSettings()
+                    syncGraphicsPanelUi()
+                }
+            }
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = if (idx == 0) 0 else dp(4)
+            }
+            resRow.addView(btn, lp)
+            resolutionButtonViews.add(targetScale to btn)
+        }
+        graphicsPanelContent.addView(resRow)
+
         scaleSeekBar = SeekBar(this).apply {
-            max = 10 // 0 -> 50%, 10 -> 100%
+            max = 65 // 0 -> 35%, 65 -> 100%
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    val pct = 50 + progress * 5
-                    scaleLabelView?.text = String.format(Locale.US, "Render Scale: %d%%", pct)
+                    val pct = 35 + progress
                     if (!suppressSeekBarCallbacks) {
                         gfx.renderScale = pct / 100f
+                        scaleLabelView?.text = formatResolutionLabel(gfx.renderScale)
                         pushGraphicsSettings()
                         syncPresetHighlight()
+                        syncResolutionHighlight()
                     }
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -777,6 +835,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
+    private fun syncResolutionHighlight() {
+        for ((targetScale, btn) in resolutionButtonViews) {
+            styleSelectableButton(btn, abs(gfx.renderScale - targetScale) < 0.015f)
+        }
+    }
+
     @SuppressLint("SetTextI18n")
     private fun syncGraphicsPanelUi() {
         freezeButtonView?.let { btn ->
@@ -784,6 +848,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             styleSelectableButton(btn, cameraFrozen)
         }
         syncPresetHighlight()
+        syncResolutionHighlight()
         for ((sz, btn) in shadowSizeButtonViews) {
             styleSelectableButton(btn, gfx.shadowSize == sz)
         }
@@ -793,9 +858,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             styleSelectableButton(chip, on)
         }
         suppressSeekBarCallbacks = true
-        val scaleProgress = (((gfx.renderScale * 100f).roundToInt() - 50) / 5).coerceIn(0, 10)
+        val scaleProgress = ((gfx.renderScale * 100f).roundToInt() - 35).coerceIn(0, 65)
         scaleSeekBar?.progress = scaleProgress
-        scaleLabelView?.text = String.format(Locale.US, "Render Scale: %d%%", (gfx.renderScale * 100f).roundToInt())
+        scaleLabelView?.text = formatResolutionLabel(gfx.renderScale)
 
         val cullProgress = ((gfx.minClusterPixels * 10f).roundToInt() - 1).coerceIn(0, 29)
         cullSeekBar?.progress = cullProgress
@@ -987,6 +1052,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         // Size/orientation changes are detected by the swapchain (out-of-date / suboptimal).
+        scaleLabelView?.text = formatResolutionLabel(gfx.renderScale)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {

@@ -884,8 +884,8 @@ void Renderer::destroySwapchain() {
 }
 
 bool Renderer::createRenderTargets() {
-    renderExtent_.width = std::max(16u, static_cast<uint32_t>(logicalExtent_.width * renderScale_) & ~1u);
-    renderExtent_.height = std::max(16u, static_cast<uint32_t>(logicalExtent_.height * renderScale_) & ~1u);
+    renderExtent_.width = std::max(16u, static_cast<uint32_t>(std::lround(logicalExtent_.width * renderScale_)) & ~1u);
+    renderExtent_.height = std::max(16u, static_cast<uint32_t>(std::lround(logicalExtent_.height * renderScale_)) & ~1u);
 
     ImageDesc d;
     d.width = renderExtent_.width;
@@ -2004,8 +2004,8 @@ void Renderer::recordScene(VkCommandBuffer cmd, FrameResources& frame, uint32_t 
 }
 
 void Renderer::applyGraphicsSettings(const GraphicsSettings& s) {
-    float newScale = std::clamp(s.renderScale, 0.40f, 1.0f);
-    if (std::fabs(newScale - renderScale_) > 0.005f) {
+    float newScale = std::clamp(s.renderScale, 0.35f, 1.0f);
+    if (std::fabs(newScale - renderScale_) > 0.004f) {
         renderScale_ = newScale;
         renderTargetsDirty_ = true;
     }
