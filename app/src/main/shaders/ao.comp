@@ -91,7 +91,8 @@ void main() {
             occlusion += horizon;
         }
     }
-    float visibility = clamp(1.0 - occlusion / float(kDirections * 2) * 1.15, 0.0, 1.0);
+    float distFade = smoothstep(2.0, 5.0, radiusPx);
+    float visibility = clamp(1.0 - (occlusion / float(kDirections * 2)) * 1.15 * distFade, 0.0, 1.0);
     visibility = pow(visibility, frame.aoParams.z);
     imageStore(aoOut, p, vec4(visibility, viewZ, 0.0, 0.0));
 }

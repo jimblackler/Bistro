@@ -39,6 +39,8 @@ enum MaterialFlags : uint32_t {
     // bit 2 is reserved: set at load time when the material has an ORM texture.
     kMaterialTranslucent = 1u << 3,  // thin leaf / fabric: transmits back-lit sunlight
     kMaterialLouver = 1u << 4,       // analytical band-limited louver/slat grille (inUV.x = slat phase)
+    kMaterialFrosted = 1u << 5,      // opaque frosted/etched glass with smooth outer clearcoat reflection
+    kMaterialWater = 1u << 6,        // animated river/water surface with procedural ripples and SSR
 };
 
 struct SceneHeader {

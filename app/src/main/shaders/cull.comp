@@ -35,6 +35,11 @@ bool occludedByHiZ(vec3 mn, vec3 mx) {
         smax = max(smax, uv);
         nearest = max(nearest, ndc.z);
     }
+    // Pad the projected screen box by 1.5 pixels so sub-pixel TAA jitter never causes distant clusters
+    // peeking around building silhouettes to oscillate between culled and visible.
+    vec2 pad = 1.5 / max(frame.renderParams.zw, vec2(1.0));
+    smin -= pad;
+    smax += pad;
     if (any(lessThan(smin, vec2(0.0))) || any(greaterThan(smax, vec2(1.0)))) return false;
     vec2 hizSize = frame.occlusionParams.xy;
     vec2 sizePx = (smax - smin) * hizSize;

@@ -765,6 +765,45 @@ def main():
         # separately) snaps shared border vertices differently on each side and tears cracks.
         add_to_bucket(mat_name, pos, nrm, st, weld_grid=0.0)
 
+    # Build a subdivided water surface mesh across the river valley basin around the Pyramid & Banyan clearing
+    # at Z-up elevation z = -0.85 m wherever the underlying terrain riverbed drops below the water plane.
+    if ter_tiles:
+        water_z = -0.85
+        all_ter = np.vstack([t[1] for t in ter_tiles])
+        cell_size = 2.5
+        gx = np.arange(ORIGIN_X - 152.5, ORIGIN_X + 152.5, cell_size, dtype=np.float32)
+        gy = np.arange(ORIGIN_Y - 152.5, ORIGIN_Y + 152.5, cell_size, dtype=np.float32)
+        nx, ny = len(gx), len(gy)
+        # Mark grid cells whose terrain height is below water_z + 0.65m (with 1-cell dilation so the water
+        # edge tucks cleanly beneath the sloped riverbank without gaps).
+        sub_pts = all_ter[all_ter[:, 2] < water_z + 0.65]
+        ix = np.clip(((sub_pts[:, 0] - gx[0]) / cell_size).astype(np.int32), 0, nx - 1)
+        iy = np.clip(((sub_pts[:, 1] - gy[0]) / cell_size).astype(np.int32), 0, ny - 1)
+        wet = np.zeros((nx, ny), dtype=bool)
+        wet[ix, iy] = True
+        wet_dil = wet.copy()
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                wet_dil |= np.roll(np.roll(wet, dx, axis=0), dy, axis=1)
+        wx_idx, wy_idx = np.nonzero(wet_dil)
+        if len(wx_idx) > 0:
+            x0 = gx[wx_idx]
+            y0 = gy[wy_idx]
+            x1 = x0 + cell_size
+            y1 = y0 + cell_size
+            z0 = np.full_like(x0, water_z)
+            # Counter-clockwise triangles in Z-up (+Z normal -> +Y normal in Y-up glTF)
+            v00 = np.stack([x0, y0, z0], axis=1)
+            v10 = np.stack([x1, y0, z0], axis=1)
+            v11 = np.stack([x1, y1, z0], axis=1)
+            v01 = np.stack([x0, y1, z0], axis=1)
+            r_pos = np.stack([v00, v10, v11, v00, v11, v01], axis=1).reshape(-1, 3)
+            r_nrm = np.zeros_like(r_pos)
+            r_nrm[:, 2] = 1.0
+            r_st = (r_pos[:, :2] - np.array([ORIGIN_X, ORIGIN_Y], dtype=np.float32)) * 0.05
+            add_to_bucket('River', r_pos, r_nrm, r_st, weld_grid=0.0)
+            log(f'  Generated {len(r_pos) // 3} River valley water triangles at z={water_z}m')
+
     # 4. Hero Banyan Tree (placed overlooking the riverbank clearing at Z-up (585.0, 782.0, 1.5))
     log('4/6 Parsing Banyan.usd ...')
     ban_meshes = parse_usd_meshes(os.path.join(USD_DIR, 'elements', 'Banyan', 'Banyan.usd'))
@@ -820,7 +859,8 @@ def main():
             if len(pos_all) == 0:
                 continue
             d = np.linalg.norm(pos_all[:, :2] - c_xy, axis=1)
-            mask = np.nonzero(d < max_dist)[0]
+            # Keep scattered trees/shrubs/grass on the riverbanks above the deep river channel (z >= -1.05m).
+            mask = np.nonzero((d < max_dist) & (pos_all[:, 2] >= -1.05))[0]
             if len(mask) > 0:
                 active.append((pname, pos_all, sc_all, ori_all, d, mask))
 

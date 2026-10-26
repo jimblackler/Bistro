@@ -604,40 +604,58 @@ public:
                 r.baseColorFactor[2] = 0.7f;
                 r.baseColorFactor[3] = 1.0f;
             } else if (m.name == "River") {
-                r.roughnessFactor = 0.06f;
+                r.flags |= bistro::kMaterialWater;
+                r.roughnessFactor = 0.04f;
                 r.metallicFactor = 0.0f;
             }
             if (r.alphaMode == bistro::kAlphaBlend) {
-                r.baseColorTexture = textureIndex(m.baseColor, bistro::kTextureBaseColor);
-                if (containsCI(m.name, "Spotlight")) {
-                    r.roughnessFactor = 0.35f;
-                } else if (containsCI(m.name, "Dirty")) {
-                    r.roughnessFactor = 0.22f;
-                } else {
-                    r.roughnessFactor = 0.12f;
-                }
                 r.metallicFactor = 0.0f;
-                // The Bistro glass was authored for path tracing (specular transmission) and its base colour
-                // textures are fully opaque. Give it a raster-friendly opacity so windows are see-through.
-                auto st = stats_.all.find(m.baseColor);
-                bool textureHasAlpha =
-                    st != stats_.all.end() && (st->second.translucent > 0.01f || st->second.cutout > 0.01f);
-                if (!textureHasAlpha) {
-                    float alpha = 0.14f;
-                    if (containsCI(m.name, "Dirty")) alpha = 0.24f;
-                    else if (containsCI(m.name, "Emissive")) alpha = 0.6f;
-                    else if (containsCI(m.name, "Bottle") || containsCI(m.name, "Wine")) alpha = 0.38f;
-                    r.baseColorFactor[3] = alpha;
+                // The Bistro glass was authored for path tracing (specular transmission) with near-black
+                // placeholder BaseColor textures. Assign clean translucent glass tints and roughness.
+                if (containsCI(m.name, "Spotlight") || containsCI(m.name, "Emissive")) {
+                    r.baseColorTexture = textureIndex(m.baseColor, bistro::kTextureBaseColor);
+                    r.roughnessFactor = 0.25f;
+                    r.baseColorFactor[3] = 0.55f;
+                } else if (containsCI(m.name, "Wine")) {
+                    r.baseColorTexture = -1;
+                    r.baseColorFactor[0] = 0.14f;
+                    r.baseColorFactor[1] = 0.24f;
+                    r.baseColorFactor[2] = 0.09f;
+                    r.baseColorFactor[3] = 0.16f;
+                    r.roughnessFactor = 0.05f;
+                } else if (containsCI(m.name, "Bottle")) {
+                    r.baseColorTexture = -1;
+                    r.baseColorFactor[0] = 0.20f;
+                    r.baseColorFactor[1] = 0.25f;
+                    r.baseColorFactor[2] = 0.18f;
+                    r.baseColorFactor[3] = 0.12f;
+                    r.roughnessFactor = 0.05f;
+                } else if (containsCI(m.name, "Dirty")) {
+                    r.baseColorTexture = -1;
+                    r.baseColorFactor[0] = 0.30f;
+                    r.baseColorFactor[1] = 0.33f;
+                    r.baseColorFactor[2] = 0.35f;
+                    r.baseColorFactor[3] = 0.08f;
+                    r.roughnessFactor = 0.12f;
+                } else {
+                    r.baseColorTexture = -1;
+                    r.baseColorFactor[0] = 0.34f;
+                    r.baseColorFactor[1] = 0.38f;
+                    r.baseColorFactor[2] = 0.42f;
+                    r.baseColorFactor[3] = 0.05f;
+                    r.roughnessFactor = 0.05f;
                 }
             } else if (containsCI(m.name, "Frosted") || containsCI(m.name, "Frozen")) {
                 r.baseColorTexture = textureIndex(m.baseColor, bistro::kTextureBaseColor);
-                // Opaque frosted glass on unbacked exterior doors/transoms: diffuse frosted roughness so
-                // the pebbled normal map scatters light softly instead of acting like a warped mirror.
-                r.roughnessFactor = 0.65f;
+                r.flags |= bistro::kMaterialFrosted;
+                // Opaque frosted glass on partitions/transoms: soft translucent inner body with a
+                // flat, unwarped outer plate-glass reflection in scene.frag.
+                r.roughnessFactor = 0.42f;
                 r.metallicFactor = 0.0f;
-                r.baseColorFactor[0] = 0.28f;
-                r.baseColorFactor[1] = 0.31f;
-                r.baseColorFactor[2] = 0.33f;
+                r.baseColorFactor[0] = 0.72f;
+                r.baseColorFactor[1] = 0.78f;
+                r.baseColorFactor[2] = 0.82f;
+                r.baseColorFactor[3] = 1.0f;
             } else if (r.alphaMode == bistro::kAlphaOpaque && !(r.flags & bistro::kMaterialEmissive)) {
                 auto st = stats_.all.find(m.baseColor);
                 if (st != stats_.all.end() && st->second.maxStdDev < 0.01f &&
@@ -645,16 +663,20 @@ public:
                     // Replace 16x16 all-zero black placeholder BaseColor textures with realistic colours.
                     r.baseColorTexture = -1;
                     if (containsCI(m.name, "Rollup_Door")) {
-                        r.baseColorFactor[0] = 0.36f;
-                        r.baseColorFactor[1] = 0.39f;
-                        r.baseColorFactor[2] = 0.42f;
-                        r.roughnessFactor = 0.45f;
-                        r.metallicFactor = 0.70f;
+                        r.baseColorFactor[0] = 0.48f;
+                        r.baseColorFactor[1] = 0.51f;
+                        r.baseColorFactor[2] = 0.54f;
+                        r.roughnessFactor = 0.42f;
+                        r.metallicFactor = 0.22f;
                     } else if (containsCI(m.name, "Toffee")) {
                         r.baseColorFactor[0] = 0.55f;
                         r.baseColorFactor[1] = 0.32f;
                         r.baseColorFactor[2] = 0.14f;
                         r.roughnessFactor = 0.35f;
+                    } else if (m.name == "River") {
+                        r.baseColorFactor[0] = 0.12f;
+                        r.baseColorFactor[1] = 0.28f;
+                        r.baseColorFactor[2] = 0.22f;
                     } else {
                         r.baseColorFactor[0] = 0.24f;
                         r.baseColorFactor[1] = 0.24f;

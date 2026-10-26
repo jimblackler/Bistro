@@ -86,22 +86,32 @@ void main() {
         return;
     }
 
-    vec3 hist = toYCoCg(compress(sampleHistory(prevUV, texSize)));
+    // Variance clipping, intersected with the min/max box (wider when slow so 8x Halton jitter
+    // accumulates cleanly on sub-pixel grilles, thin lines, distant mullions, and alpha-cutout foliage).
+    vec3 mean = m1 / 9.0;
+    vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
+    // In reversed-Z (depth = zNear / z), depthJump equals deltaZ / zFar. Lower the threshold so
+    // distant architectural depth discontinuities (balcony railings, recessed windows, lampposts)
+    // are recognized as silhouettes alongside local high-contrast sub-pixel edges.
+    float depthJump = (nearestDepth - farthestDepth) / max(nearestDepth, 1e-5);
+    float silhouette = smoothstep(0.005, 0.05, depthJump);
+    float subpixelContrast = smoothstep(0.015, 0.09, sigma.x);
+    float edgeFactor = max(silhouette, subpixelContrast);
+
+    // Blend Catmull-Rom toward bilinear on high-contrast sub-pixel edges and silhouettes so negative
+    // bicubic lobes never ring or crawl across distant architectural details.
+    vec3 histBicubic = sampleHistory(prevUV, texSize);
+    vec3 histBilinear = textureLod(historyColor, prevUV, 0.0).rgb;
+    vec3 hist = toYCoCg(compress(mix(histBicubic, histBilinear, edgeFactor * 0.75)));
     vec2 velocityPx = (inUV - prevUV) * texSize;
     float speed = length(velocityPx);
 
-    // Variance clipping, intersected with the min/max box (wider when slow so 8x Halton jitter
-    // accumulates cleanly on sub-pixel grilles, thin lines, and alpha-cutout foliage).
-    vec3 mean = m1 / 9.0;
-    vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
-    float depthJump = (nearestDepth - farthestDepth) / max(nearestDepth, 1e-5);
-    float silhouette = smoothstep(0.15, 0.50, depthJump);
-    // Soften single-pixel jitter steps on high-contrast sub-pixel edges and alpha-cutout silhouettes.
-    float tentMix = max(smoothstep(0.02, 0.10, sigma.x) * 0.45, silhouette * 0.65);
+    // Soften single-pixel jitter steps on high-contrast sub-pixel edges and silhouettes.
+    float tentMix = max(subpixelContrast * 0.65, silhouette * 0.70);
     cur = mix(cur, curTent, tentMix);
-    float gamma = mix(1.65, 1.25, clamp(speed / 2.0, 0.0, 1.0)) + silhouette * 0.5;
-    float slowFactor = 1.0 - clamp(speed / 1.5, 0.0, 1.0);
-    vec3 slack = vec3(silhouette * slowFactor * 0.06, 0.01, 0.01);
+    float gamma = mix(1.75, 1.35, clamp(speed / 2.0, 0.0, 1.0)) + edgeFactor * 0.65;
+    float slowFactor = 1.0 - clamp(speed / 2.0, 0.0, 1.0);
+    vec3 slack = vec3(edgeFactor * (0.025 + slowFactor * 0.055), 0.012, 0.012);
     vec3 boxMin = max(mn - slack, mean - gamma * sigma);
     vec3 boxMax = min(mx + slack, mean + gamma * sigma);
     vec3 center = 0.5 * (boxMax + boxMin);
@@ -111,12 +121,15 @@ void main() {
     float t = max(ts.x, max(ts.y, ts.z));
     if (t > 1.0) {
         vec3 clippedHist = center + offset / t;
-        float clipStrength = mix(0.18, 1.0, clamp(speed / 2.5, 0.0, 1.0));
+        float minClip = mix(0.22, 0.12, edgeFactor);
+        float maxClip = mix(0.95, 0.65, edgeFactor * slowFactor);
+        float clipStrength = mix(minClip, maxClip, clamp(speed / 3.0, 0.0, 1.0));
         hist = mix(hist, clippedHist, clipStrength);
     }
 
-    // Blend: more current frame when the camera moved a lot (sub-pixel velocity reduces blur).
-    float feedback = mix(frame.taaParams.z, frame.taaParams.z - 0.08, clamp(speed / 8.0, 0.0, 1.0));
+    // Blend: higher history weight on slow high-frequency edges, more current frame on fast motion.
+    float baseFeedback = mix(frame.taaParams.z, min(frame.taaParams.z + 0.03, 0.94), edgeFactor * slowFactor);
+    float feedback = mix(baseFeedback, baseFeedback - 0.07, clamp(speed / 8.0, 0.0, 1.0));
     vec3 result = mix(cur, hist, feedback);
     outColor = vec4(decompress(fromYCoCg(result)), 1.0);
 }
