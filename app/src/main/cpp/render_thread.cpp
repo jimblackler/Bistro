@@ -81,6 +81,20 @@ void RenderThread::setDebugOptions(double startTime, bool freeze, const CameraOv
     cv_.notify_all();
 }
 
+void RenderThread::setGraphicsSettings(const GraphicsSettings& settings) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pendingSettings_ = settings;
+    settingsDirty_ = true;
+    cv_.notify_all();
+}
+
+void RenderThread::setCameraFrozen(bool frozen) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    freezePending_ = frozen;
+    freezeDirty_ = true;
+    cv_.notify_all();
+}
+
 void RenderThread::run() {
     prctl(PR_SET_NAME, "BistroRender", 0, 0, 0);
     Renderer renderer;
@@ -135,6 +149,14 @@ void RenderThread::run() {
                     renderer.setCameraOverride(override_);
                     debugDirty_ = false;
                 }
+                if (settingsDirty_) {
+                    if (ok) renderer.applyGraphicsSettings(pendingSettings_);
+                    settingsDirty_ = false;
+                }
+                if (freezeDirty_) {
+                    freeze = freezePending_;
+                    freezeDirty_ = false;
+                }
                 if (ok && window && !paused_) break;
                 cv_.wait(lock);
                 last = Clock::now();
@@ -171,8 +193,9 @@ void RenderThread::run() {
             const RenderStats& s = renderer.stats();
             const char* tour = s.cameraSegmentName.empty() ? "Fly-Through" : s.cameraSegmentName.c_str();
             snprintf(buf, sizeof(buf),
-                     "%s · %.0f fps · GPU %.1f ms · %u×%u %s\n%u/%u clusters · %.2fM of %.1fM triangles drawn",
-                     tour, s.fps, s.gpuMs, s.renderWidth, s.renderHeight, s.taa ? "TAA" : "4×MSAA",
+                     "%s · %.0f fps · GPU %.1f ms · %u×%u %s · %uk shadow\n%u/%u clusters · %.2fM of %.1fM triangles drawn",
+                     tour, s.fps, s.gpuMs, s.renderWidth, s.renderHeight, s.taa ? "TAA" : "1×",
+                     s.shadowSize / 1024,
                      s.visibleClusters[0] + s.visibleClusters[1] + s.visibleClusters[2], s.totalClusters,
                      static_cast<double>(s.visibleTriangles) / 1e6, static_cast<double>(s.totalTriangles) / 1e6);
             static int logCounter = 0;

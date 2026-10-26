@@ -1,5 +1,6 @@
 package com.android.demo.bistro
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
 import android.content.res.AssetManager
@@ -24,7 +25,11 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
+import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import org.json.JSONObject
 
 /**
@@ -43,6 +48,8 @@ import org.json.JSONObject
  *  - `camera` (string "x,y,z,tx,ty,tz"): fixed eye and target position.
  *  - `hud` (boolean): show (default) or hide the overlay.
  *  - `startScreen` (boolean): force showing the Start screen even when debug extras are passed.
+ *  - `preset` (string "low"|"medium"|"high"|"ultra"): apply a graphics quality preset.
+ *  - `graphicsPanel` (boolean): open the Graphics Settings panel on launch.
  */
 class MainActivity : Activity(), SurfaceHolder.Callback {
 
@@ -57,6 +64,21 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val previewAssetPath: String
     )
 
+    private data class GraphicsConfig(
+        var renderScale: Float = 1.0f,
+        var shadowSize: Int = 8192,
+        var minClusterPixels: Float = 0.20f,
+        var bloomScale: Float = 1.0f,
+        var aoIntensityScale: Float = 1.0f,
+        var ssrEnabled: Boolean = true,
+        var contactShadowsEnabled: Boolean = true,
+        var volumetricFogEnabled: Boolean = true,
+        var aoEnabled: Boolean = true,
+        var shadowPcfEnabled: Boolean = true,
+        var taaEnabled: Boolean = true,
+        var occlusionCulling: Boolean = true
+    )
+
     private lateinit var statusText: TextView
     private lateinit var envTitleText: TextView
     private lateinit var attributionText: TextView
@@ -67,11 +89,29 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var pageSubtitleText: TextView
     private lateinit var prevEnvButton: View
     private lateinit var nextEnvButton: View
+    private lateinit var graphicsPanelContainer: View
+    private lateinit var graphicsPanelContent: LinearLayout
 
     private val handler = Handler(Looper.getMainLooper())
     private val environments = mutableListOf<EnvironmentEntry>()
     private val cardViews = mutableListOf<View>()
     private val cardBadgeViews = mutableListOf<TextView>()
+
+    private val gfx = GraphicsConfig()
+    private var cameraFrozen = false
+    private var suppressSeekBarCallbacks = false
+    private var freezeButtonView: TextView? = null
+    private val presetButtonViews = mutableListOf<Pair<String, TextView>>()
+    private val shadowSizeButtonViews = mutableListOf<Pair<Int, TextView>>()
+    private val toggleChipViews = mutableListOf< Triple<TextView, String, () -> Boolean> >()
+    private var scaleLabelView: TextView? = null
+    private var scaleSeekBar: SeekBar? = null
+    private var cullLabelView: TextView? = null
+    private var cullSeekBar: SeekBar? = null
+    private var aoLabelView: TextView? = null
+    private var aoSeekBar: SeekBar? = null
+    private var bloomLabelView: TextView? = null
+    private var bloomSeekBar: SeekBar? = null
 
     private var activeEnvIndex = 0
     private var nextDefaultIndex = 0
@@ -95,7 +135,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private val countdownTick = object : Runnable {
         override fun run() {
-            if (inFlyby || environments.isEmpty()) return
+            if (inFlyby || environments.isEmpty() || graphicsPanelContainer.isVisible()) return
             if (countdownRemaining <= 0) {
                 launchEnvironment(nextDefaultIndex)
                 return
@@ -124,6 +164,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         pageSubtitleText = findViewById(R.id.page_subtitle_text)
         prevEnvButton = findViewById(R.id.prev_env_button)
         nextEnvButton = findViewById(R.id.next_env_button)
+        graphicsPanelContainer = findViewById(R.id.graphics_panel_container)
+        graphicsPanelContent = findViewById(R.id.graphics_panel_content)
 
         prevEnvButton.setOnClickListener { stepStartScreenPage(-1) }
         nextEnvButton.setOnClickListener { stepStartScreenPage(1) }
@@ -146,10 +188,19 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             showStartScreen()
         }
 
+        findViewById<View>(R.id.graphics_button).setOnClickListener {
+            toggleGraphicsPanel()
+        }
+        findViewById<View>(R.id.start_graphics_button).setOnClickListener {
+            toggleGraphicsPanel()
+        }
+
         onBackInvokedDispatcher.registerOnBackInvokedCallback(
             android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
         ) {
-            if (inFlyby) {
+            if (graphicsPanelContainer.isVisible()) {
+                setGraphicsPanelVisible(false)
+            } else if (inFlyby) {
                 if (environments.isNotEmpty()) {
                     nextDefaultIndex = (activeEnvIndex + 1) % environments.size
                 }
@@ -162,15 +213,19 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val surfaceView = findViewById<SurfaceView>(R.id.surface_view)
         surfaceView.holder.addCallback(this)
         surfaceView.setOnClickListener {
-            if (inFlyby) {
+            if (graphicsPanelContainer.isVisible()) {
+                setGraphicsPanelVisible(false)
+            } else if (inFlyby) {
                 overlay.visibility = if (overlay.isVisible()) View.GONE else View.VISIBLE
             }
         }
 
         discoverEnvironments()
         buildEnvironmentCards()
+        buildGraphicsPanel()
 
         nativeCreate(assets)
+        pushGraphicsSettings()
         if (!applyDebugExtras()) {
             showStartScreen()
         }
@@ -344,6 +399,418 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         updateVisibleCards()
     }
 
+    private fun toggleGraphicsPanel() {
+        setGraphicsPanelVisible(!graphicsPanelContainer.isVisible())
+    }
+
+    private fun setGraphicsPanelVisible(visible: Boolean) {
+        graphicsPanelContainer.visibility = if (visible) View.VISIBLE else View.GONE
+        if (visible) {
+            syncGraphicsPanelUi()
+            if (!inFlyby) {
+                handler.removeCallbacks(countdownTick)
+            }
+        } else if (!inFlyby && environments.isNotEmpty()) {
+            handler.removeCallbacks(countdownTick)
+            handler.postDelayed(countdownTick, 1000L)
+        }
+    }
+
+    private fun applyPreset(presetName: String) {
+        when (presetName.lowercase(Locale.ROOT)) {
+            "low" -> {
+                gfx.renderScale = 0.60f
+                gfx.shadowSize = 2048
+                gfx.minClusterPixels = 1.50f
+                gfx.bloomScale = 1.0f
+                gfx.aoIntensityScale = 0.0f
+                gfx.ssrEnabled = false
+                gfx.contactShadowsEnabled = false
+                gfx.volumetricFogEnabled = false
+                gfx.aoEnabled = false
+                gfx.shadowPcfEnabled = false
+                gfx.taaEnabled = true
+                gfx.occlusionCulling = true
+            }
+            "medium" -> {
+                gfx.renderScale = 0.75f
+                gfx.shadowSize = 4096
+                gfx.minClusterPixels = 0.60f
+                gfx.bloomScale = 1.0f
+                gfx.aoIntensityScale = 1.0f
+                gfx.ssrEnabled = false
+                gfx.contactShadowsEnabled = true
+                gfx.volumetricFogEnabled = false
+                gfx.aoEnabled = true
+                gfx.shadowPcfEnabled = true
+                gfx.taaEnabled = true
+                gfx.occlusionCulling = true
+            }
+            "high" -> {
+                gfx.renderScale = 0.85f
+                gfx.shadowSize = 4096
+                gfx.minClusterPixels = 0.30f
+                gfx.bloomScale = 1.0f
+                gfx.aoIntensityScale = 1.0f
+                gfx.ssrEnabled = true
+                gfx.contactShadowsEnabled = true
+                gfx.volumetricFogEnabled = true
+                gfx.aoEnabled = true
+                gfx.shadowPcfEnabled = true
+                gfx.taaEnabled = true
+                gfx.occlusionCulling = true
+            }
+            else -> {
+                gfx.renderScale = 1.0f
+                gfx.shadowSize = 8192
+                gfx.minClusterPixels = 0.20f
+                gfx.bloomScale = 1.0f
+                gfx.aoIntensityScale = 1.0f
+                gfx.ssrEnabled = true
+                gfx.contactShadowsEnabled = true
+                gfx.volumetricFogEnabled = true
+                gfx.aoEnabled = true
+                gfx.shadowPcfEnabled = true
+                gfx.taaEnabled = true
+                gfx.occlusionCulling = true
+            }
+        }
+        pushGraphicsSettings()
+        syncGraphicsPanelUi()
+    }
+
+    private fun currentPresetName(): String {
+        if (abs(gfx.renderScale - 1.0f) < 0.02f && gfx.shadowSize == 8192 &&
+            abs(gfx.minClusterPixels - 0.20f) < 0.05f && gfx.ssrEnabled &&
+            gfx.contactShadowsEnabled && gfx.volumetricFogEnabled && gfx.aoEnabled &&
+            gfx.shadowPcfEnabled && gfx.taaEnabled && gfx.occlusionCulling
+        ) return "ultra"
+        if (abs(gfx.renderScale - 0.85f) < 0.02f && gfx.shadowSize == 4096 &&
+            abs(gfx.minClusterPixels - 0.30f) < 0.05f && gfx.ssrEnabled &&
+            gfx.contactShadowsEnabled && gfx.volumetricFogEnabled && gfx.aoEnabled &&
+            gfx.shadowPcfEnabled && gfx.taaEnabled && gfx.occlusionCulling
+        ) return "high"
+        if (abs(gfx.renderScale - 0.75f) < 0.02f && gfx.shadowSize == 4096 &&
+            abs(gfx.minClusterPixels - 0.60f) < 0.05f && !gfx.ssrEnabled &&
+            gfx.contactShadowsEnabled && !gfx.volumetricFogEnabled && gfx.aoEnabled &&
+            gfx.shadowPcfEnabled && gfx.taaEnabled && gfx.occlusionCulling
+        ) return "medium"
+        if (abs(gfx.renderScale - 0.60f) < 0.02f && gfx.shadowSize == 2048 &&
+            abs(gfx.minClusterPixels - 1.50f) < 0.05f && !gfx.ssrEnabled &&
+            !gfx.contactShadowsEnabled && !gfx.volumetricFogEnabled && !gfx.aoEnabled &&
+            !gfx.shadowPcfEnabled && gfx.taaEnabled && gfx.occlusionCulling
+        ) return "low"
+        return ""
+    }
+
+    private fun pushGraphicsSettings() {
+        nativeSetGraphicsSettings(
+            gfx.renderScale,
+            gfx.shadowSize,
+            gfx.minClusterPixels,
+            gfx.bloomScale,
+            gfx.aoIntensityScale,
+            gfx.ssrEnabled,
+            gfx.contactShadowsEnabled,
+            gfx.volumetricFogEnabled,
+            gfx.aoEnabled,
+            gfx.shadowPcfEnabled,
+            gfx.taaEnabled,
+            gfx.occlusionCulling
+        )
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun buildGraphicsPanel() {
+        graphicsPanelContent.removeAllViews()
+        presetButtonViews.clear()
+        shadowSizeButtonViews.clear()
+        toggleChipViews.clear()
+
+        // 1. Header row: Title + Freeze Camera + Close button
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val title = TextView(this).apply {
+            text = "Graphics & Performance"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTypeface(typeface, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        headerRow.addView(title)
+
+        val freezeBtn = TextView(this).apply {
+            background = getDrawable(R.drawable.card_background)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTypeface(typeface, Typeface.BOLD)
+            setOnClickListener {
+                cameraFrozen = !cameraFrozen
+                nativeSetCameraFrozen(cameraFrozen)
+                syncGraphicsPanelUi()
+            }
+        }
+        val freezeParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = dp(6) }
+        headerRow.addView(freezeBtn, freezeParams)
+        freezeButtonView = freezeBtn
+
+        val closeBtn = TextView(this).apply {
+            text = "✕"
+            background = getDrawable(R.drawable.card_background)
+            setPadding(dp(9), dp(3), dp(9), dp(3))
+            setTextColor(Color.parseColor("#CFD8DC"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTypeface(typeface, Typeface.BOLD)
+            setOnClickListener { setGraphicsPanelVisible(false) }
+        }
+        headerRow.addView(closeBtn)
+        graphicsPanelContent.addView(headerRow)
+
+        fun addSectionLabel(labelText: String): TextView {
+            val tv = TextView(this).apply {
+                text = labelText
+                setTextColor(Color.parseColor("#90A4AE"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTypeface(typeface, Typeface.BOLD)
+                setPadding(0, dp(8), 0, dp(3))
+            }
+            graphicsPanelContent.addView(tv)
+            return tv
+        }
+
+        // 2. Quality Presets row
+        addSectionLabel("Quality Preset")
+        val presetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val presets = listOf("low" to "Low", "medium" to "Medium", "high" to "High", "ultra" to "Ultra")
+        for ((idx, pair) in presets.withIndex()) {
+            val (key, label) = pair
+            val btn = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setPadding(0, dp(5), 0, dp(5))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTypeface(typeface, Typeface.BOLD)
+                setOnClickListener { applyPreset(key) }
+            }
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = if (idx == 0) 0 else dp(4)
+            }
+            presetRow.addView(btn, lp)
+            presetButtonViews.add(key to btn)
+        }
+        graphicsPanelContent.addView(presetRow)
+
+        // 3. Render Resolution Scale slider (50% .. 100%, step 5%)
+        scaleLabelView = addSectionLabel("Render Scale: 100%")
+        scaleSeekBar = SeekBar(this).apply {
+            max = 10 // 0 -> 50%, 10 -> 100%
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val pct = 50 + progress * 5
+                    scaleLabelView?.text = String.format(Locale.US, "Render Scale: %d%%", pct)
+                    if (!suppressSeekBarCallbacks) {
+                        gfx.renderScale = pct / 100f
+                        pushGraphicsSettings()
+                        syncPresetHighlight()
+                    }
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        graphicsPanelContent.addView(scaleSeekBar)
+
+        // 4. Shadow Map Resolution segmented buttons (2048, 4096, 8192)
+        addSectionLabel("Directional Shadow Map")
+        val shadowRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val shadowSizes = listOf(2048 to "2K (2048)", 4096 to "4K (4096)", 8192 to "8K (8192)")
+        for ((idx, pair) in shadowSizes.withIndex()) {
+            val (sz, label) = pair
+            val btn = TextView(this).apply {
+                text = label
+                gravity = Gravity.CENTER
+                setPadding(0, dp(5), 0, dp(5))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTypeface(typeface, Typeface.BOLD)
+                setOnClickListener {
+                    gfx.shadowSize = sz
+                    pushGraphicsSettings()
+                    syncGraphicsPanelUi()
+                }
+            }
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = if (idx == 0) 0 else dp(4)
+            }
+            shadowRow.addView(btn, lp)
+            shadowSizeButtonViews.add(sz to btn)
+        }
+        graphicsPanelContent.addView(shadowRow)
+
+        // 5. Feature Toggles (2-column compact chip grid)
+        addSectionLabel("Rendering Features")
+        data class ToggleSpec(val label: String, val get: () -> Boolean, val toggle: () -> Unit)
+        val toggleSpecs = listOf(
+            ToggleSpec("SSR Reflections", { gfx.ssrEnabled }, { gfx.ssrEnabled = !gfx.ssrEnabled }),
+            ToggleSpec("Contact Shadows", { gfx.contactShadowsEnabled }, { gfx.contactShadowsEnabled = !gfx.contactShadowsEnabled }),
+            ToggleSpec("Volumetric Rays", { gfx.volumetricFogEnabled }, { gfx.volumetricFogEnabled = !gfx.volumetricFogEnabled }),
+            ToggleSpec("Screen-Space AO", { gfx.aoEnabled }, { gfx.aoEnabled = !gfx.aoEnabled }),
+            ToggleSpec("8-Tap Shadow PCF", { gfx.shadowPcfEnabled }, { gfx.shadowPcfEnabled = !gfx.shadowPcfEnabled }),
+            ToggleSpec("Temporal AA", { gfx.taaEnabled }, { gfx.taaEnabled = !gfx.taaEnabled }),
+            ToggleSpec("Hi-Z Occlusion", { gfx.occlusionCulling }, { gfx.occlusionCulling = !gfx.occlusionCulling })
+        )
+        var rowLayout: LinearLayout? = null
+        for ((idx, spec) in toggleSpecs.withIndex()) {
+            if (idx % 2 == 0) {
+                rowLayout = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(0, dp(2), 0, dp(2))
+                }
+                graphicsPanelContent.addView(rowLayout)
+            }
+            val chip = TextView(this).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(6), dp(5), dp(6), dp(5))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTypeface(typeface, Typeface.BOLD)
+                setOnClickListener {
+                    spec.toggle()
+                    pushGraphicsSettings()
+                    syncGraphicsPanelUi()
+                }
+            }
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = if (idx % 2 == 0) 0 else dp(4)
+            }
+            rowLayout?.addView(chip, lp)
+            toggleChipViews.add(Triple(chip, spec.label, spec.get))
+        }
+        if (toggleSpecs.size % 2 == 1) {
+            rowLayout?.addView(
+                View(this),
+                LinearLayout.LayoutParams(0, 1, 1f).apply { marginStart = dp(4) }
+            )
+        }
+
+        // 6. Small-Cluster Culling Threshold slider (0.1 px .. 3.0 px)
+        cullLabelView = addSectionLabel("Small-Cluster Culling: 0.2 px")
+        cullSeekBar = SeekBar(this).apply {
+            max = 29 // 0 -> 0.1 px, 29 -> 3.0 px
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val px = (progress + 1) * 0.10f
+                    cullLabelView?.text = String.format(Locale.US, "Small-Cluster Culling: %.1f px", px)
+                    if (!suppressSeekBarCallbacks) {
+                        gfx.minClusterPixels = px
+                        pushGraphicsSettings()
+                        syncPresetHighlight()
+                    }
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        graphicsPanelContent.addView(cullSeekBar)
+
+        // 7. SSAO Intensity Scale slider (0% .. 200%, step 10%)
+        aoLabelView = addSectionLabel("AO Intensity: 100%")
+        aoSeekBar = SeekBar(this).apply {
+            max = 20 // 0 -> 0%, 20 -> 200%
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val pct = progress * 10
+                    aoLabelView?.text = String.format(Locale.US, "AO Intensity: %d%%", pct)
+                    if (!suppressSeekBarCallbacks) {
+                        gfx.aoIntensityScale = pct / 100f
+                        pushGraphicsSettings()
+                        syncPresetHighlight()
+                    }
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        graphicsPanelContent.addView(aoSeekBar)
+
+        // 8. Bloom Intensity Scale slider (0% .. 200%, step 10%)
+        bloomLabelView = addSectionLabel("Bloom Intensity: 100%")
+        bloomSeekBar = SeekBar(this).apply {
+            max = 20 // 0 -> 0%, 20 -> 200%
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val pct = progress * 10
+                    bloomLabelView?.text = String.format(Locale.US, "Bloom Intensity: %d%%", pct)
+                    if (!suppressSeekBarCallbacks) {
+                        gfx.bloomScale = pct / 100f
+                        pushGraphicsSettings()
+                        syncPresetHighlight()
+                    }
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        graphicsPanelContent.addView(bloomSeekBar)
+
+        syncGraphicsPanelUi()
+    }
+
+    private fun styleSelectableButton(tv: TextView, selected: Boolean) {
+        tv.background = getDrawable(
+            if (selected) R.drawable.card_selected_background else R.drawable.card_background
+        )
+        tv.setTextColor(Color.parseColor(if (selected) "#81D4FA" else "#B0BEC5"))
+    }
+
+    private fun syncPresetHighlight() {
+        val activePreset = currentPresetName()
+        for ((key, btn) in presetButtonViews) {
+            styleSelectableButton(btn, key == activePreset)
+        }
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun syncGraphicsPanelUi() {
+        freezeButtonView?.let { btn ->
+            btn.text = if (cameraFrozen) "▶ Resume Cam" else "⏸ Freeze Cam"
+            styleSelectableButton(btn, cameraFrozen)
+        }
+        syncPresetHighlight()
+        for ((sz, btn) in shadowSizeButtonViews) {
+            styleSelectableButton(btn, gfx.shadowSize == sz)
+        }
+        for ((chip, label, getter) in toggleChipViews) {
+            val on = getter()
+            chip.text = if (on) "✓ $label" else label
+            styleSelectableButton(chip, on)
+        }
+        suppressSeekBarCallbacks = true
+        val scaleProgress = (((gfx.renderScale * 100f).roundToInt() - 50) / 5).coerceIn(0, 10)
+        scaleSeekBar?.progress = scaleProgress
+        scaleLabelView?.text = String.format(Locale.US, "Render Scale: %d%%", (gfx.renderScale * 100f).roundToInt())
+
+        val cullProgress = ((gfx.minClusterPixels * 10f).roundToInt() - 1).coerceIn(0, 29)
+        cullSeekBar?.progress = cullProgress
+        cullLabelView?.text = String.format(Locale.US, "Small-Cluster Culling: %.1f px", gfx.minClusterPixels)
+
+        val aoProgress = ((gfx.aoIntensityScale * 10f).roundToInt()).coerceIn(0, 20)
+        aoSeekBar?.progress = aoProgress
+        aoLabelView?.text = String.format(Locale.US, "AO Intensity: %d%%", (gfx.aoIntensityScale * 100f).roundToInt())
+
+        val bloomProgress = ((gfx.bloomScale * 10f).roundToInt()).coerceIn(0, 20)
+        bloomSeekBar?.progress = bloomProgress
+        bloomLabelView?.text = String.format(Locale.US, "Bloom Intensity: %d%%", (gfx.bloomScale * 100f).roundToInt())
+        suppressSeekBarCallbacks = false
+    }
+
     private fun updateVisibleCards() {
         val pages = pageCount()
         val showChevrons = pages > 1
@@ -366,6 +833,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun showStartScreen() {
         inFlyby = false
+        cameraFrozen = false
+        nativeSetCameraFrozen(false)
         handler.removeCallbacks(countdownTick)
         startOverlay.visibility = View.VISIBLE
         overlay.visibility = View.GONE
@@ -380,7 +849,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
         countdownRemaining = COUNTDOWN_SECONDS
         updateCountdownUi()
-        handler.postDelayed(countdownTick, 1000L)
+        if (!graphicsPanelContainer.isVisible()) {
+            handler.postDelayed(countdownTick, 1000L)
+        }
     }
 
     private fun updateCountdownUi() {
@@ -409,10 +880,12 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         activeEnvIndex = index.coerceIn(0, environments.lastIndex)
         val env = environments[activeEnvIndex]
         inFlyby = true
+        cameraFrozen = false
         envTitleText.text = env.title
         attributionText.text = env.attribution
         startOverlay.visibility = View.GONE
         overlay.visibility = if (hudEnabled) View.VISIBLE else View.GONE
+        syncGraphicsPanelUi()
         nativeSetEnvironment(env.assetDir, true)
     }
 
@@ -427,6 +900,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun applyDebugExtras(): Boolean {
         val extras = intent?.extras ?: return false
         hudEnabled = extras.getBoolean("hud", true)
+        extras.getString("preset")?.let { applyPreset(it) }
+        if (extras.containsKey("graphicsPanel")) {
+            setGraphicsPanelVisible(extras.getBoolean("graphicsPanel", false))
+        }
         if (extras.getBoolean("startScreen", false)) {
             val reqEnv = extras.getString("env")
             if (reqEnv != null) {
@@ -457,6 +934,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
         val startTime = extras.getFloat("startTime", 0f)
         val freeze = extras.getBoolean("freeze", false)
+        cameraFrozen = freeze
+        syncGraphicsPanelUi()
         val camera = extras.getString("camera")
             ?.split(",")
             ?.mapNotNull { it.trim().toFloatOrNull() }
@@ -482,7 +961,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         super.onResume()
         nativeSetPaused(false)
         handler.post(statusUpdater)
-        if (!inFlyby && environments.isNotEmpty()) {
+        if (!inFlyby && environments.isNotEmpty() && !graphicsPanelContainer.isVisible()) {
             handler.removeCallbacks(countdownTick)
             handler.postDelayed(countdownTick, 1000L)
         }
@@ -522,6 +1001,21 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private external fun nativeIsFlybyCompleted(): Boolean
     private external fun nativeSetEnvironment(assetDir: String, startFlyby: Boolean)
     private external fun nativeSetDebugOptions(startTime: Float, freeze: Boolean, camera: FloatArray?)
+    private external fun nativeSetGraphicsSettings(
+        renderScale: Float,
+        shadowSize: Int,
+        minClusterPixels: Float,
+        bloomScale: Float,
+        aoIntensityScale: Float,
+        ssrEnabled: Boolean,
+        contactShadowsEnabled: Boolean,
+        volumetricFogEnabled: Boolean,
+        aoEnabled: Boolean,
+        shadowPcfEnabled: Boolean,
+        taaEnabled: Boolean,
+        occlusionCulling: Boolean
+    )
+    private external fun nativeSetCameraFrozen(frozen: Boolean)
 
     companion object {
         private const val STATUS_INTERVAL_MS = 250L

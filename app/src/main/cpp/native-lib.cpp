@@ -77,4 +77,30 @@ JNIEXPORT void JNICALL Java_com_android_demo_bistro_MainActivity_nativeSetDebugO
     gThread->setDebugOptions(startTime, freeze == JNI_TRUE, o);
 }
 
+JNIEXPORT void JNICALL Java_com_android_demo_bistro_MainActivity_nativeSetGraphicsSettings(
+        JNIEnv*, jobject, jfloat renderScale, jint shadowSize, jfloat minClusterPixels, jfloat bloomScale,
+        jfloat aoIntensityScale, jboolean ssrEnabled, jboolean contactShadowsEnabled, jboolean volumetricFogEnabled,
+        jboolean aoEnabled, jboolean shadowPcfEnabled, jboolean taaEnabled, jboolean occlusionCulling) {
+    if (!gThread) return;
+    GraphicsSettings s;
+    s.renderScale = renderScale;
+    s.shadowSize = static_cast<uint32_t>(shadowSize);
+    s.minClusterPixels = minClusterPixels;
+    s.bloomScale = bloomScale;
+    s.aoIntensityScale = aoIntensityScale;
+    s.ssrEnabled = (ssrEnabled == JNI_TRUE);
+    s.contactShadowsEnabled = (contactShadowsEnabled == JNI_TRUE);
+    s.volumetricFogEnabled = (volumetricFogEnabled == JNI_TRUE);
+    s.aoEnabled = (aoEnabled == JNI_TRUE);
+    s.shadowPcfEnabled = (shadowPcfEnabled == JNI_TRUE);
+    s.taaEnabled = (taaEnabled == JNI_TRUE);
+    s.occlusionCulling = (occlusionCulling == JNI_TRUE);
+    gThread->setGraphicsSettings(s);
+}
+
+JNIEXPORT void JNICALL Java_com_android_demo_bistro_MainActivity_nativeSetCameraFrozen(
+        JNIEnv*, jobject, jboolean frozen) {
+    if (gThread) gThread->setCameraFrozen(frozen == JNI_TRUE);
+}
+
 }  // extern "C"

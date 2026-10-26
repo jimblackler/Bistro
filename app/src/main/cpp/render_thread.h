@@ -24,6 +24,8 @@ public:
     std::string status();
     bool isFlybyCompleted();
     void setDebugOptions(double startTime, bool freeze, const CameraOverride& override);
+    void setGraphicsSettings(const GraphicsSettings& settings);
+    void setCameraFrozen(bool frozen);
 
 private:
     void run();
@@ -47,4 +49,8 @@ private:
     bool freeze_ = false;
     CameraOverride override_;
     bool debugDirty_ = false;
+    GraphicsSettings pendingSettings_{};
+    bool settingsDirty_ = false;
+    bool freezePending_ = false;
+    bool freezeDirty_ = false;
 };
