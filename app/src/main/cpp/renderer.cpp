@@ -1210,8 +1210,24 @@ void Renderer::writeStaticDescriptors() {
         img(6, &skyInfo);
         img(7, &specInfo);
         buf(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &exposureInfo);
-        img(15, texInfos.data(), static_cast<uint32_t>(texInfos.size()));
         vkUpdateDescriptorSets(ctx_.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+        // PowerVR's HWPerfClientVulkanMarkEndPrefiltered (active when GPU profiling is enabled)
+        // serialises vkUpdateDescriptorSets into a fixed 3,224-byte stack buffer at 20 bytes per
+        // combined-image-sampler descriptor without bounds checking. Batch binding 15 updates into
+        // chunks of 64 descriptors (~1.3 KB) so the driver stack buffer never overflows.
+        constexpr size_t kMaxTexDescriptorsPerUpdate = 64;
+        for (size_t offset = 0; offset < texInfos.size(); offset += kMaxTexDescriptorsPerUpdate) {
+            uint32_t count = static_cast<uint32_t>(std::min(kMaxTexDescriptorsPerUpdate, texInfos.size() - offset));
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = f.set;
+            w.dstBinding = 15;
+            w.dstArrayElement = static_cast<uint32_t>(offset);
+            w.descriptorCount = count;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w.pImageInfo = texInfos.data() + offset;
+            vkUpdateDescriptorSets(ctx_.device, 1, &w, 0, nullptr);
+        }
     }
 }
 
